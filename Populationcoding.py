@@ -144,4 +144,4 @@ if uploaded_file is not None:
         )
 
         df["Area Cumulative (ha)"] = (
-            df["Residential
+            df["Residential]
