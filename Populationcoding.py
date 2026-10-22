@@ -1,144 +1,68 @@
-import streamlit as st
-import pandas as pd
+# ------------------------------------------
+# CLEAN COLUMN NAMES
+# ------------------------------------------
 
-st.set_page_config(
-    page_title="Sanitary Sewer Design",
-    layout="wide"
+df.columns = (
+    df.columns
+    .str.strip()
+    .str.replace("(", "", regex=False)
+    .str.replace(")", "", regex=False)
+    .str.replace(".", "_", regex=False)
 )
 
-st.title("Sanitary Sewer Design Sheet")
+# ------------------------------------------
+# AUTOMATIC COLUMN DETECTION
+# ------------------------------------------
 
-uploaded_file = st.file_uploader(
-    "Upload CSV",
-    type=["csv"]
-)
+column_map = {}
 
-if uploaded_file:
+for col in df.columns:
 
-    df = pd.read_csv(uploaded_file)
+    col_lower = col.lower()
 
-    # ----------------------------------
-    # REQUIRED INPUT COLUMNS
-    # ----------------------------------
-    required = [
-        "Location",
-        "Pipe_ID",
-        "From_MH_ID",
-        "To_MH_ID",
-        "Subcatchment_ID",
-        "Residential_Pop_per_ha",
-        "Residential_Area_ha",
-        "Industrial_Commercial_Area_ha"
-    ]
+    if "location" in col_lower or "street" in col_lower:
+        column_map[col] = "Location"
 
-    missing = [
-        c for c in required
-        if c not in df.columns
-    ]
+    elif "pipe id" in col_lower or col_lower == "pipeid":
+        column_map[col] = "Pipe_ID"
 
-    if missing:
-        st.error(
-            f"Missing columns: {missing}"
-        )
-        st.stop()
+    elif "from mh" in col_lower:
+        column_map[col] = "From_MH_ID"
 
-    # ----------------------------------
-    # RESIDENTIAL CALCULATIONS
-    # ----------------------------------
+    elif "to mh" in col_lower:
+        column_map[col] = "To_MH_ID"
 
-    df["Residential Population"] = (
-        df["Residential_Pop_per_ha"]
-        * df["Residential_Area_ha"]
-    )
+    elif col_lower in ["from", "frommh"]:
+        column_map[col] = "From_MH_ID"
 
-    df["Area Cumulative (ha)"] = (
-        df["Residential_Area_ha"]
-        .cumsum()
-    )
+    elif col_lower in ["to", "tomh"]:
+        column_map[col] = "To_MH_ID"
 
-    df["Population Cumulative"] = (
-        df["Residential Population"]
-        .cumsum()
-    )
+    elif "subcatchment" in col_lower:
+        column_map[col] = "Subcatchment_ID"
 
-    # ----------------------------------
-    # INDUSTRIAL / COMMERCIAL
-    # ----------------------------------
+    elif "subc" in col_lower:
+        column_map[col] = "Subcatchment_ID"
 
-    df["Cumulative IC Area (ha)"] = (
-        df["Industrial_Commercial_Area_ha"]
-        .cumsum()
-    )
+    elif "population per ha" in col_lower:
+        column_map[col] = "Residential_Pop_per_ha"
 
-    # ----------------------------------
-    # TOTALS
-    # ----------------------------------
+    elif col_lower == "pop":
+        column_map[col] = "Residential_Pop_per_ha"
 
-    total_res_area = (
-        df["Residential_Area_ha"]
-        .sum()
-    )
+    elif (
+        "industrial" in col_lower
+        and "area" in col_lower
+    ):
+        column_map[col] = "Industrial_Commercial_Area_ha"
 
-    total_res_population = (
-        df["Residential Population"]
-        .sum()
-    )
+    elif (
+        "area" in col_lower
+        and "industrial" not in col_lower
+    ):
+        column_map[col] = "Residential_Area_ha"
 
-    # ----------------------------------
-    # OUTPUT TABLE
-    # ----------------------------------
+df.rename(columns=column_map, inplace=True)
 
-    output = df[
-        [
-            "Location",
-            "Pipe_ID",
-            "From_MH_ID",
-            "To_MH_ID",
-            "Subcatchment_ID",
-            "Residential_Pop_per_ha",
-            "Residential_Area_ha",
-            "Residential Population",
-            "Area Cumulative (ha)",
-            "Population Cumulative",
-            "Industrial_Commercial_Area_ha",
-            "Cumulative IC Area (ha)"
-        ]
-    ]
-
-    st.subheader("Residential / Industrial Summary")
-
-    st.dataframe(
-        output,
-        use_container_width=True
-    )
-
-    # ----------------------------------
-    # TOTALS
-    # ----------------------------------
-
-    col1, col2 = st.columns(2)
-
-    col1.metric(
-        "Total Residential Area (ha)",
-        round(total_res_area, 2)
-    )
-
-    col2.metric(
-        "Total Residential Population",
-        round(total_res_population, 0)
-    )
-
-    # ----------------------------------
-    # EXPORT
-    # ----------------------------------
-
-    csv = output.to_csv(
-        index=False
-    )
-
-    st.download_button(
-        "Download Results",
-        csv,
-        "Residential_Design_Sheet.csv",
-        "text/csv"
-    )
+st.write("Detected columns:")
+st.write(df.columns.tolist())
