@@ -2,46 +2,44 @@ import streamlit as st
 import pandas as pd
 import math
 
+# ============================================================================
+# PAGE CONFIG
+# ============================================================================
+
 st.set_page_config(
-    page_title="Sanitary Sewer Design",
+    page_title="Sanitary Sewer Design Tool",
     layout="wide"
 )
 
-##############################################################################
+# ============================================================================
 # FUNCTIONS
-##############################################################################
+# ============================================================================
 
-def harmon_factor(pop):
+def harmon_factor(population):
 
-    P = max(pop / 1000, 0.001)
+    P = max(population / 1000, 0.001)
 
-    M = 1 + 14 / (4 + math.sqrt(P))
+    M = 1 + (14 / (4 + math.sqrt(P)))
 
     M = max(2, min(4, M))
 
     return M
 
 
-def calculate_slope(
-        us_invert,
-        ds_invert,
-        length):
+def calculate_slope(us, ds, length):
 
     if length <= 0:
         return 0.00001
 
-    slope = (
-        us_invert -
-        ds_invert
-    ) / length
+    slope = (us - ds) / length
 
     return max(slope, 0.00001)
 
 
-def manning_capacity(
-        diameter_mm,
-        slope,
-        n):
+def manning_capacity(diameter_mm, slope, n):
+
+    if slope <= 0:
+        return 0
 
     D = diameter_mm / 1000
 
@@ -49,33 +47,31 @@ def manning_capacity(
 
     hydraulic_radius = D / 4
 
-    q = (
+    Q = (
         (1 / n)
         * area
-        * (hydraulic_radius ** (2/3))
+        * (hydraulic_radius ** (2 / 3))
         * math.sqrt(slope)
     )
 
-    return q * 1000
+    return Q * 1000
 
 
-def velocity(
-        diameter_mm,
-        capacity_ls):
+def velocity(diameter_mm, capacity_ls):
 
     D = diameter_mm / 1000
 
     area = math.pi * D**2 / 4
 
+    if area == 0:
+        return 0
+
     return (capacity_ls / 1000) / area
 
 
-def recommend_pipe(
-        design_flow,
-        slope,
-        n):
+def recommend_pipe(flow, slope, n):
 
-    pipe_sizes = [
+    sizes = [
         200,
         250,
         300,
@@ -87,36 +83,41 @@ def recommend_pipe(
         900
     ]
 
-    for pipe in pipe_sizes:
+    for size in sizes:
 
         cap = manning_capacity(
-            pipe,
+            size,
             slope,
             n
         )
 
-        if cap >= design_flow:
+        if cap >= flow:
+            return size
 
-            return pipe
-
-    return "Oversized"
+    return "Larger Required"
 
 
-##############################################################################
+# ============================================================================
 # TITLE
-##############################################################################
+# ============================================================================
 
-st.title(
-    "Sanitary Sewer Design Tool"
-)
+st.title("Sanitary Sewer Design Tool")
 
-##############################################################################
-# SIDEBAR
-##############################################################################
+st.markdown("""
+Upload either:
 
-st.sidebar.header(
-    "Design Parameters"
-)
+• GIS Export CSV
+
+or
+
+• Sewer Design CSV
+""")
+
+# ============================================================================
+# PARAMETERS
+# ============================================================================
+
+st.sidebar.header("Design Parameters")
 
 per_capita_flow = st.sidebar.number_input(
     "Per Capita Flow (L/cap/day)",
@@ -139,254 +140,163 @@ manning_n = st.sidebar.number_input(
     format="%.3f"
 )
 
-##############################################################################
-# UPLOAD
-##############################################################################
+# ============================================================================
+# FILE UPLOAD
+# ============================================================================
 
 uploaded_file = st.file_uploader(
     "Upload CSV",
     type=["csv"]
 )
 
-##############################################################################
-# SAMPLE FORMAT
-##############################################################################
-
-with st.expander("CSV Format Example"):
-
-    sample = pd.DataFrame({
-
-        "Street":["Example Road"],
-
-        "FromMH":["MH-1"],
-
-        "ToMH":["MH-2"],
-
-        "Area_ha":[0.66],
-
-        "Length_m":[70],
-
-        "Diameter_mm":[200],
-
-        "UpstreamInvert":[103.556],
-
-        "DownstreamInvert":[103.297],
-
-        "PopDensity":[124]
-
-    })
-
-    st.dataframe(sample)
-
-##############################################################################
+# ============================================================================
 # PROCESS FILE
-##############################################################################
+# ============================================================================
 
 if uploaded_file:
 
-    df = pd.read_csv(uploaded_file)
+    try:
 
-    cumulative_pop = 0
-    cumulative_area = 0
+        df = pd.read_csv(uploaded_file)
 
-    results = []
+        st.subheader("Raw Columns Found")
 
-    for index, row in df.iterrows():
+        st.write(df.columns.tolist())
 
-        density = row.get(
-            "PopDensity",
-            default_density
+        # ---------------------------------------------------
+        # CLEAN COLUMN NAMES
+        # ---------------------------------------------------
+
+        df.columns = (
+            df.columns
+            .str.strip()
+            .str.replace(" ", "_", regex=False)
+            .str.replace(".", "_", regex=False)
         )
 
-        area = row["Area_ha"]
+        # ---------------------------------------------------
+        # GIS COLUMN CONVERSION
+        # ---------------------------------------------------
 
-        population = area * density
+        rename_map = {
 
-        cumulative_pop += population
+            "FROMMH": "FromMH",
+            "TOMH": "ToMH",
 
-        cumulative_area += area
+            "DIAMETER": "Diameter_mm",
 
-        peaking = harmon_factor(
-            cumulative_pop
+            "UPELEV": "UpstreamInvert",
+            "DOWNELEV": "DownstreamInvert",
+
+            "SHAPE_LEN": "Length_m",
+
+            "AREA_ha": "Area_ha",
+            "AREA_HA": "Area_ha",
+            "Area_ha": "Area_ha"
+        }
+
+        df.rename(
+            columns=rename_map,
+            inplace=True
         )
 
-        q_peak = (
-            cumulative_pop
-            * per_capita_flow
-            * peaking
-            / 86400
-        )
+        # ---------------------------------------------------
+        # CREATE OPTIONAL FIELDS
+        # ---------------------------------------------------
 
-        q_infiltration = (
-            cumulative_area
-            * extraneous_rate
-        )
+        if "Street" not in df.columns:
+            df["Street"] = "Unknown"
 
-        q_design = (
-            q_peak
-            + q_infiltration
-        )
+        if "PopDensity" not in df.columns:
+            df["PopDensity"] = default_density
 
-        slope = calculate_slope(
-            row["UpstreamInvert"],
-            row["DownstreamInvert"],
-            row["Length_m"]
-        )
+        # ---------------------------------------------------
+        # REQUIRED FIELDS
+        # ---------------------------------------------------
 
-        capacity = manning_capacity(
-            row["Diameter_mm"],
-            slope,
-            manning_n
-        )
+        required = [
+            "FromMH",
+            "ToMH",
+            "Area_ha",
+            "Length_m",
+            "Diameter_mm",
+            "UpstreamInvert",
+            "DownstreamInvert"
+        ]
 
-        vel = velocity(
-            row["Diameter_mm"],
-            capacity
-        )
+        missing = []
 
-        utilization = 0
+        for col in required:
 
-        if capacity > 0:
+            if col not in df.columns:
+                missing.append(col)
 
-            utilization = (
-                q_design
-                / capacity
+        if len(missing) > 0:
+
+            st.error(
+                f"Missing Columns: {missing}"
             )
 
-        recommended = recommend_pipe(
-            q_design,
-            slope,
-            manning_n
-        )
+            st.write("Columns Available:")
 
-        if utilization < 0.50:
+            st.write(df.columns.tolist())
 
-            status = "GOOD"
+            st.stop()
 
-        elif utilization < 0.80:
+        st.success("CSV Loaded Successfully")
 
-            status = "CHECK"
+        cumulative_pop = 0
+        cumulative_area = 0
 
-        else:
+        results = []
 
-            status = "UPSIZE"
+        # ---------------------------------------------------
+        # CALCULATIONS
+        # ---------------------------------------------------
 
-        results.append({
+        for _, row in df.iterrows():
 
-            "Street":
-                row["Street"],
+            area = float(row.get("Area_ha", 0))
 
-            "From":
-                row["FromMH"],
+            density = float(
+                row.get(
+                    "PopDensity",
+                    default_density
+                )
+            )
 
-            "To":
-                row["ToMH"],
+            population = area * density
 
-            "Area (ha)":
-                round(area,2),
+            cumulative_pop += population
 
-            "Population":
-                round(cumulative_pop),
+            cumulative_area += area
 
-            "Peaking":
-                round(peaking,2),
+            peaking = harmon_factor(
+                cumulative_pop
+            )
 
-            "Q Peak (L/s)":
-                round(q_peak,2),
+            q_peak = (
+                cumulative_pop
+                * per_capita_flow
+                * peaking
+                / 86400
+            )
 
-            "Q Extraneous":
-                round(q_infiltration,2),
+            q_extraneous = (
+                cumulative_area
+                * extraneous_rate
+            )
 
-            "Q Design":
-                round(q_design,2),
+            q_design = (
+                q_peak
+                + q_extraneous
+            )
 
-            "Slope %":
-                round(slope*100,3),
+            slope = calculate_slope(
 
-            "Diameter":
-                row["Diameter_mm"],
+                float(
+                    row["UpstreamInvert"]
+                ),
 
-            "Capacity":
-                round(capacity,2),
-
-            "Velocity":
-                round(vel,2),
-
-            "Utilization":
-                round(utilization,2),
-
-            "Recommended Pipe":
-                recommended,
-
-            "Status":
-                status
-        })
-
-    results_df = pd.DataFrame(results)
-
-    ##########################################################################
-
-    st.subheader("Results")
-
-    st.dataframe(
-        results_df,
-        use_container_width=True
-    )
-
-    ##########################################################################
-
-    st.subheader("Summary")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Total Population",
-        int(results_df["Population"].max())
-    )
-
-    col2.metric(
-        "Max Design Flow",
-        round(
-            results_df["Q Design"].max(),
-            2
-        )
-    )
-
-    col3.metric(
-        "Average Utilization",
-        round(
-            results_df["Utilization"].mean(),
-            2
-        )
-    )
-
-    col4.metric(
-        "Max Capacity",
-        round(
-            results_df["Capacity"].max(),
-            2
-        )
-    )
-
-    ##########################################################################
-
-    st.subheader("Capacity Chart")
-
-    chart = results_df.set_index(
-        "From"
-    )[["Capacity","Q Design"]]
-
-    st.bar_chart(chart)
-
-    ##########################################################################
-
-    csv = results_df.to_csv(
-        index=False
-    )
-
-    st.download_button(
-        "Download Results CSV",
-        csv,
-        "Sewer_Design_Results.csv",
-        "text/csv"
-    )
+                float(
+                    row["
