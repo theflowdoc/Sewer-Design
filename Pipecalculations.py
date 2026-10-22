@@ -257,6 +257,11 @@ for col in optional_sewer_columns:
             "Population_per_ha",
             "Residential_Area_ha",
             "Industrial_Area_ha"
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m",
+            
         ]
 
         for col in numeric_cols:
