@@ -434,6 +434,15 @@ df = st.data_editor(
             "Peak ICI Flow Q(p)",
             "Peak Extraneous Flow Q(i)",
             "Peak Design Flow Q(t)"
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m",
+            "Pipe_Type",
+            "Slope (%)",
+            "Capacity (L/s)",
+            "Full Flow Velocity (m/s)",
+            "Q Peak / Q Capacity",
         ]
 
         df[flow_cols] = df[flow_cols].round(2)
