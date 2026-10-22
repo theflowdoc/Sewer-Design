@@ -144,4 +144,99 @@ if uploaded_file is not None:
         )
 
         df["Area Cumulative (ha)"] = (
-            df["Residential]
+            df["Residential_Area_ha"]
+            .cumsum()
+        )
+
+        df["Population Cumulative"] = (
+            df["Residential Population"]
+            .cumsum()
+        )
+
+        df["Industrial Cumulative Area (ha)"] = (
+            df["Industrial_Area_ha"]
+            .cumsum()
+        )
+
+        # -------------------------------------------------
+        # RESULTS TABLE
+        # -------------------------------------------------
+
+        results = df[
+            [
+                "Location",
+                "Pipe_ID",
+                "From_MH_ID",
+                "To_MH_ID",
+                "Subcatchment_ID",
+                "Population_per_ha",
+                "Residential_Area_ha",
+                "Residential Population",
+                "Area Cumulative (ha)",
+                "Population Cumulative",
+                "Industrial_Area_ha",
+                "Industrial Cumulative Area (ha)"
+            ]
+        ]
+
+        st.success(
+            "Population coding completed successfully."
+        )
+
+        st.dataframe(
+            results,
+            use_container_width=True
+        )
+
+        # -------------------------------------------------
+        # TOTALS
+        # -------------------------------------------------
+
+        total_area = round(
+            df["Residential_Area_ha"].sum(),
+            2
+        )
+
+        total_population = round(
+            df["Residential Population"].sum(),
+            0
+        )
+
+        col1, col2 = st.columns(2)
+
+        col1.metric(
+            "Total Residential Area (ha)",
+            total_area
+        )
+
+        col2.metric(
+            "Total Residential Population",
+            int(total_population)
+        )
+
+        # -------------------------------------------------
+        # DOWNLOAD
+        # -------------------------------------------------
+
+        csv_data = results.to_csv(
+            index=False
+        )
+
+        st.download_button(
+            label="Download Results CSV",
+            data=csv_data,
+            file_name="population_results.csv",
+            mime="text/csv"
+        )
+
+    except Exception as e:
+
+        st.error(
+            f"Error: {str(e)}"
+        )
+
+else:
+
+    st.info(
+        "Upload a CSV file to begin."
+    )
