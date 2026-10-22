@@ -117,6 +117,21 @@ if uploaded_file is not None:
 
             elif "industrial" in c:
                 rename_map[col] = "Industrial_Area_ha"
+                
+            elif "length" in c:
+                rename_map[col] = "Length_m"
+
+            elif "diameter" in c:
+               rename_map[col] = "Pipe_Diameter_mm"
+
+            elif "upstream invert" in c:
+              rename_map[col] = "Upstream_Invert_m"
+
+           elif "downstream invert" in c:
+             rename_map[col] = "Downstream_Invert_m"
+
+           elif "type of pipe" in c:
+             rename_map[col] = "Pipe_Type"
 
         df.rename(columns=rename_map, inplace=True)
 
