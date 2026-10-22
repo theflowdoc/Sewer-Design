@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 
-# ==================================================
+# =====================================================
 # PAGE SETUP
-# ==================================================
+# =====================================================
 
 st.set_page_config(
     page_title="Population Coding",
@@ -12,18 +12,18 @@ st.set_page_config(
 
 st.title("Population Coding Tool")
 
-# ==================================================
+# =====================================================
 # FILE UPLOAD
-# ==================================================
+# =====================================================
 
 uploaded_file = st.file_uploader(
     "Upload CSV",
     type=["csv"]
 )
 
-# ==================================================
+# =====================================================
 # PROCESS FILE
-# ==================================================
+# =====================================================
 
 if uploaded_file is not None:
 
@@ -32,19 +32,15 @@ if uploaded_file is not None:
         # Read CSV
         df = pd.read_csv(uploaded_file)
 
-        # Show original columns
-        st.subheader("Columns Found")
-        st.write(df.columns.tolist())
-
         # Clean column names
         df.columns = (
             df.columns
             .str.strip()
         )
 
-        # ------------------------------------------------
-        # AUTOMATIC COLUMN MAPPING
-        # ------------------------------------------------
+        # -------------------------------------------------
+        # AUTO MAP COLUMNS
+        # -------------------------------------------------
 
         rename_map = {}
 
@@ -52,10 +48,10 @@ if uploaded_file is not None:
 
             c = col.lower().strip()
 
-            if c == "street":
+            if c in ["street", "location"]:
                 rename_map[col] = "Location"
 
-            elif c == "pipe id":
+            elif c in ["pipe id", "pipe_id"]:
                 rename_map[col] = "Pipe_ID"
 
             elif c == "from":
@@ -67,10 +63,10 @@ if uploaded_file is not None:
             elif "subc" in c:
                 rename_map[col] = "Subcatchment_ID"
 
-            elif c == "pop":
+            elif c in ["pop", "population per ha"]:
                 rename_map[col] = "Population_per_ha"
 
-            elif c == "area":
+            elif c in ["area", "area (ha)"]:
                 rename_map[col] = "Residential_Area_ha"
 
             elif "industrial" in c:
@@ -81,18 +77,18 @@ if uploaded_file is not None:
             inplace=True
         )
 
-        # ------------------------------------------------
-        # OPTIONAL INDUSTRIAL COLUMN
-        # ------------------------------------------------
+        # -------------------------------------------------
+        # CREATE INDUSTRIAL COLUMN IF MISSING
+        # -------------------------------------------------
 
         if "Industrial_Area_ha" not in df.columns:
-            df["Industrial_Area_ha"] = 0
+            df["Industrial_Area_ha"] = 0.0
 
-        # ------------------------------------------------
-        # REQUIRED COLUMNS
-        # ------------------------------------------------
+        # -------------------------------------------------
+        # CHECK REQUIRED COLUMNS
+        # -------------------------------------------------
 
-        required = [
+        required_columns = [
             "Location",
             "Pipe_ID",
             "From_MH_ID",
@@ -103,8 +99,9 @@ if uploaded_file is not None:
         ]
 
         missing = [
-            c for c in required
-            if c not in df.columns
+            col
+            for col in required_columns
+            if col not in df.columns
         ]
 
         if missing:
@@ -113,19 +110,33 @@ if uploaded_file is not None:
                 f"Missing columns: {missing}"
             )
 
-            st.write(
-                "Mapped Columns:"
-            )
-
-            st.write(
-                df.columns.tolist()
-            )
+            st.write("Columns found:")
+            st.write(df.columns.tolist())
 
             st.stop()
 
-        # ------------------------------------------------
+        # -------------------------------------------------
+        # CONVERT TO NUMERIC
+        # -------------------------------------------------
+
+        df["Population_per_ha"] = pd.to_numeric(
+            df["Population_per_ha"],
+            errors="coerce"
+        ).fillna(0)
+
+        df["Residential_Area_ha"] = pd.to_numeric(
+            df["Residential_Area_ha"],
+            errors="coerce"
+        ).fillna(0)
+
+        df["Industrial_Area_ha"] = pd.to_numeric(
+            df["Industrial_Area_ha"],
+            errors="coerce"
+        ).fillna(0)
+
+        # -------------------------------------------------
         # CALCULATIONS
-        # ------------------------------------------------
+        # -------------------------------------------------
 
         df["Residential Population"] = (
             df["Population_per_ha"]
@@ -133,28 +144,4 @@ if uploaded_file is not None:
         )
 
         df["Area Cumulative (ha)"] = (
-            df["Residential_Area_ha"]
-            .cumsum()
-        )
-
-        df["Population Cumulative"] = (
-            df["Residential Population"]
-            .cumsum()
-        )
-
-        df["Industrial Cumulative Area (ha)"] = (
-            df["Industrial_Area_ha"]
-            .cumsum()
-        )
-
-        # ------------------------------------------------
-        # OUTPUT TABLE
-        # ------------------------------------------------
-
-        results = df[
-            [
-                "Location",
-                "Pipe_ID",
-                "From_MH_ID",
-                "To_MH_ID",
-                "
+            df["Residential
