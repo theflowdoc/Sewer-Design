@@ -203,15 +203,15 @@ if uploaded_file is not None:
            "Pipe_Type"
 ]
 
-for col in optional_sewer_columns:
+           for col in optional_sewer_columns:
 
-    if col not in df.columns:
+               if col not in df.columns:
 
-        if col == "Pipe_Type":
-            df[col] = ""
+                  if col == "Pipe_Type":
+                     df[col] = ""
 
-        else:
-            df[col] = 0
+                  else:
+                    df[col] = 0
 
         # =====================================================
         # REQUIRED COLUMNS
