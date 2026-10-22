@@ -29,13 +29,13 @@ i = st.sidebar.number_input(
     value=0.28
 )
 
-ici_rate = st.sidebar.number_input(
-    "Industrial Sewage (m³/ha/day)",
-    value=35.0
+commercial_domestic_sewage = st.sidebar.number_input(
+    "Commercial Domestic Sewage (L/d-m²)",
+    value=5.0
 )
 
 ici_peak = st.sidebar.number_input(
-    "ICI Peaking Factor",
+    "Commercial / ICI Peaking Factor",
     value=2.0
 )
 
@@ -268,11 +268,11 @@ if uploaded_file is not None:
         )
 
         df["Peak ICI Flow Q(p)"] = (
-            df["Industrial Cumulative Area (ha)"]
-            * ici_rate
-            * 1000
-            / 86400
-            * ici_peak
+           ici_peak
+           * commercial_domestic_sewage
+           * df["Industrial Cumulative Area (ha)"]
+           * 10000
+           / 86400
         )
 
         df["Total Area (ha)"] = (
