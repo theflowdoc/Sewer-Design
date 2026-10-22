@@ -195,6 +195,24 @@ if uploaded_file is not None:
         if "Industrial_Area_ha" not in df.columns:
             df["Industrial_Area_ha"] = 0.0
 
+        optional_sewer_columns = [
+           "Length_m",
+           "Pipe_Diameter_mm",
+           "Upstream_Invert_m",
+           "Downstream_Invert_m",
+         "Pipe_Type"
+]
+
+for col in optional_sewer_columns:
+
+    if col not in df.columns:
+
+        if col == "Pipe_Type":
+            df[col] = ""
+
+        else:
+            df[col] = 0
+
         # =====================================================
         # REQUIRED COLUMNS
         # =====================================================
