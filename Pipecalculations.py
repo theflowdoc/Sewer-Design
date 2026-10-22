@@ -200,7 +200,7 @@ if uploaded_file is not None:
            "Pipe_Diameter_mm",
            "Upstream_Invert_m",
            "Downstream_Invert_m",
-         "Pipe_Type"
+           "Pipe_Type"
 ]
 
 for col in optional_sewer_columns:
