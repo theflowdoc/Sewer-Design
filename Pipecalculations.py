@@ -337,6 +337,78 @@ for col in optional_sewer_columns:
             df["Peak Extraneous Flow Q(i)"]
         )
 
+# =====================================================
+# SEWER HYDRAULICS
+# =====================================================
+
+df["Slope (%)"] = np.where(
+    df["Length_m"] > 0,
+    (
+        (
+            df["Upstream_Invert_m"]
+            -
+            df["Downstream_Invert_m"]
+        )
+        /
+        df["Length_m"]
+    ) * 100,
+    0
+)
+
+df["Diameter_m"] = (
+    df["Pipe_Diameter_mm"]
+    / 1000
+)
+
+df["Area_m2"] = (
+    np.pi
+    *
+    (df["Diameter_m"] ** 2)
+    / 4
+)
+
+df["Hydraulic_Radius_m"] = (
+    df["Diameter_m"]
+    / 4
+)
+
+df["Capacity_m3s"] = (
+    (1 / n)
+    *
+    df["Area_m2"]
+    *
+    (
+        df["Hydraulic_Radius_m"]
+        ** (2/3)
+    )
+    *
+    (
+        (df["Slope (%)"] / 100)
+        ** 0.5
+    )
+)
+
+df["Capacity (L/s)"] = (
+    df["Capacity_m3s"]
+    * 1000
+)
+
+df["Full Flow Velocity (m/s)"] = np.where(
+    df["Area_m2"] > 0,
+    df["Capacity_m3s"]
+    /
+    df["Area_m2"],
+    0
+)
+
+df["Q Peak / Q Capacity"] = np.where(
+    df["Capacity (L/s)"] > 0,
+    df["Peak Design Flow Q(t)"]
+    /
+    df["Capacity (L/s)"],
+    0
+)
+
         st.subheader("Edit Sewer Data")
 
             editable_columns = [
