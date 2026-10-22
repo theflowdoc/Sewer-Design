@@ -29,18 +29,24 @@ if uploaded_file is not None:
 
     try:
 
-        # Read CSV
+        # ---------------------------------------------
+        # READ CSV
+        # ---------------------------------------------
+
         df = pd.read_csv(uploaded_file)
 
-        # Clean column names
+        # ---------------------------------------------
+        # CLEAN COLUMN NAMES
+        # ---------------------------------------------
+
         df.columns = (
             df.columns
             .str.strip()
         )
 
-        # -------------------------------------------------
-        # AUTO MAP COLUMNS
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # AUTO COLUMN MAPPING
+        # ---------------------------------------------
 
         rename_map = {}
 
@@ -77,16 +83,16 @@ if uploaded_file is not None:
             inplace=True
         )
 
-        # -------------------------------------------------
-        # CREATE INDUSTRIAL COLUMN IF MISSING
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # OPTIONAL INDUSTRIAL COLUMN
+        # ---------------------------------------------
 
         if "Industrial_Area_ha" not in df.columns:
             df["Industrial_Area_ha"] = 0.0
 
-        # -------------------------------------------------
-        # CHECK REQUIRED COLUMNS
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # REQUIRED COLUMNS
+        # ---------------------------------------------
 
         required_columns = [
             "Location",
@@ -110,14 +116,14 @@ if uploaded_file is not None:
                 f"Missing columns: {missing}"
             )
 
-            st.write("Columns found:")
+            st.write("Columns Found:")
             st.write(df.columns.tolist())
 
             st.stop()
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # CONVERT TO NUMERIC
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         df["Population_per_ha"] = pd.to_numeric(
             df["Population_per_ha"],
@@ -134,33 +140,37 @@ if uploaded_file is not None:
             errors="coerce"
         ).fillna(0)
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # CALCULATIONS
-        # -------------------------------------------------
+        # ---------------------------------------------
 
+        # Residential Population
         df["Residential Population"] = (
             df["Population_per_ha"]
             * df["Residential_Area_ha"]
         )
 
+        # Residential Cumulative Area
         df["Area Cumulative (ha)"] = (
             df["Residential_Area_ha"]
             .cumsum()
         )
 
+        # Residential Cumulative Population
         df["Population Cumulative"] = (
             df["Residential Population"]
             .cumsum()
         )
 
+        # Industrial Cumulative Area
         df["Industrial Cumulative Area (ha)"] = (
             df["Industrial_Area_ha"]
             .cumsum()
         )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # RESULTS TABLE
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         results = df[
             [
@@ -188,35 +198,57 @@ if uploaded_file is not None:
             use_container_width=True
         )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # TOTALS
-        # -------------------------------------------------
+        # ---------------------------------------------
 
-        total_area = round(
-            df["Residential_Area_ha"].sum(),
-            2
+        total_residential_area = (
+            df["Residential_Area_ha"]
+            .sum()
         )
 
-        total_population = round(
-            df["Residential Population"].sum(),
-            0
+        # FIXED:
+        # SUM OF RESIDENTIAL POPULATION
+        # NOT CUMULATIVE POPULATION
+
+        total_residential_population = (
+            df["Residential Population"]
+            .sum()
         )
 
         col1, col2 = st.columns(2)
 
         col1.metric(
             "Total Residential Area (ha)",
-            total_area
+            round(
+                total_residential_area,
+                2
+            )
         )
 
         col2.metric(
             "Total Residential Population",
-            int(total_population)
+            int(
+                round(
+                    total_residential_population,
+                    0
+                )
+            )
         )
 
-        # -------------------------------------------------
+        st.subheader("Summary")
+
+        st.write(
+            f"Total Residential Area = {total_residential_area:.2f} ha"
+        )
+
+        st.write(
+            f"Total Residential Population = {int(round(total_residential_population,0))}"
+        )
+
+        # ---------------------------------------------
         # DOWNLOAD
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         csv_data = results.to_csv(
             index=False
@@ -234,6 +266,8 @@ if uploaded_file is not None:
         st.error(
             f"Error: {str(e)}"
         )
+
+        st.exception(e)
 
 else:
 
