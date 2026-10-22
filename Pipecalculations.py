@@ -337,6 +337,21 @@ for col in optional_sewer_columns:
             df["Peak Extraneous Flow Q(i)"]
         )
 
+        st.subheader("Edit Sewer Data")
+
+            editable_columns = [
+                "Length_m",
+                "Pipe_Diameter_mm",
+                "Upstream_Invert_m",
+                "Downstream_Invert_m"
+]
+
+df = st.data_editor(
+     df,
+     use_container_width=True,
+     hide_index=True
+ )
+
         # =====================================================
         # ROUND RESULTS
         # =====================================================
