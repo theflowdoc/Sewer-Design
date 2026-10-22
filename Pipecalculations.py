@@ -127,10 +127,10 @@ if uploaded_file is not None:
             elif "upstream invert" in c:
               rename_map[col] = "Upstream_Invert_m"
 
-           elif "downstream invert" in c:
+            elif "downstream invert" in c:
              rename_map[col] = "Downstream_Invert_m"
 
-           elif "type of pipe" in c:
+            elif "type of pipe" in c:
              rename_map[col] = "Pipe_Type"
 
         df.rename(columns=rename_map, inplace=True)
