@@ -247,6 +247,32 @@ if uploaded_file is not None:
             ).fillna(0)
 
         # =====================================================
+        # APPLY POPULATION TABLE EDITS BEFORE RECALCULATING
+        # =====================================================
+
+        population_editable_columns = [
+            "Population_per_ha",
+            "Residential_Area_ha",
+            "Industrial_Area_ha"
+        ]
+        population_editor_state = st.session_state.get("population_data_editor", {})
+        population_edited_rows = (
+            population_editor_state.get("edited_rows", {})
+            if isinstance(population_editor_state, dict) else {}
+        )
+        for row_index, changes in population_edited_rows.items():
+            try:
+                row_index = int(row_index)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= row_index < len(df):
+                for col in population_editable_columns:
+                    if col in changes:
+                        df.at[row_index, col] = pd.to_numeric(
+                            pd.Series([changes[col]]), errors="coerce"
+                        ).fillna(0).iloc[0]
+
+        # =====================================================
         # POPULATION CALCULATIONS
         # =====================================================
 
@@ -394,10 +420,51 @@ if uploaded_file is not None:
             col: "{:.2f}"
             for col in population_results.select_dtypes(include=[np.number]).columns
         }
-        st.dataframe(
-            population_results.style.format(population_formats),
+        population_formats["Population_per_ha"] = "{:.2f}"
+        population_formats["Residential_Area_ha"] = "{:.2f}"
+        population_formats["Industrial_Area_ha"] = "{:.2f}"
+        styled_population_results = population_results.style.format(population_formats)
+        population_disabled_columns = [
+            col for col in population_columns
+            if col not in population_editable_columns
+        ]
+        edited_population_data = st.data_editor(
+            styled_population_results,
+            column_config={
+                "Location": st.column_config.TextColumn("Location"),
+                "Pipe_ID": st.column_config.TextColumn("Pipe ID"),
+                "From_MH_ID": st.column_config.TextColumn("From MH ID"),
+                "To_MH_ID": st.column_config.TextColumn("To MH ID"),
+                "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
+                "Population_per_ha": st.column_config.NumberColumn(
+                    "Population per ha", min_value=0.0, step=10.0, format="%.2f"
+                ),
+                "Residential_Area_ha": st.column_config.NumberColumn(
+                    "Residential Area (ha)", min_value=0.0, step=0.1, format="%.2f"
+                ),
+                "Residential Population": st.column_config.NumberColumn(
+                    "Residential Population", format="%.2f"
+                ),
+                "Area Cumulative (ha)": st.column_config.NumberColumn(
+                    "Area Cumulative (ha)", format="%.2f"
+                ),
+                "Population Cumulative": st.column_config.NumberColumn(
+                    "Population Cumulative", format="%.2f"
+                ),
+                "Industrial_Area_ha": st.column_config.NumberColumn(
+                    "Industrial Area (ha)", min_value=0.0, step=0.1, format="%.2f"
+                ),
+                "Industrial Cumulative Area (ha)": st.column_config.NumberColumn(
+                    "Industrial Cumulative Area (ha)", format="%.2f"
+                ),
+                "Total Area (ha)": st.column_config.NumberColumn(
+                    "Total Area (ha)", format="%.2f"
+                )
+            },
+            disabled=population_disabled_columns,
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            key="population_data_editor"
         )
 
         # =====================================================
