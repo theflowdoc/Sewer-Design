@@ -347,7 +347,27 @@ if uploaded_file is not None:
             )
             return data
 
-        # Calculate once so computed fields can be included in the editable table.
+        # Re-apply the latest edits before calculating hydraulics. Streamlit reruns
+        # the script after each data_editor change; reading edited_rows here means
+        # the calculated columns are refreshed in the editor on that same rerun.
+        editable_columns = [
+            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m", "Downstream_Invert_m"
+        ]
+        editor_state = st.session_state.get("sewer_data_editor", {})
+        edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
+        for row_index, changes in edited_rows.items():
+            try:
+                row_index = int(row_index)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= row_index < len(df):
+                for col in editable_columns:
+                    if col in changes:
+                        df.at[row_index, col] = pd.to_numeric(
+                            pd.Series([changes[col]]), errors="coerce"
+                        ).fillna(0).iloc[0]
+
+        # Recalculate using the current editable values before rendering tables.
         df = calculate_hydraulics(df, n)
 
         id_columns = [
@@ -404,67 +424,6 @@ if uploaded_file is not None:
         )
 
         # =====================================================
-        # SEWER DATA TABLE (EDITABLE INPUTS)
-        # =====================================================
-
-        st.subheader("Sewer Data")
-        st.caption(
-            "Edit Length, Pipe Size, and invert elevations. "
-            "Hydraulic results and the Results table recalculate automatically."
-        )
-
-        id_columns = [
-            "Location", "Pipe_ID", "From_MH_ID", "To_MH_ID", "Subcatchment_ID"
-        ]
-        sewer_columns = id_columns + [
-            "Peak Design Flow Q(t)",
-            "Length_m",
-            "Pipe_Diameter_mm",
-            "Upstream_Invert_m",
-            "Downstream_Invert_m",
-            "Pipe_Type",
-            "Slope (%)",
-            "Capacity (L/s)",
-            "Full Flow Velocity (m/s)",
-            "Q Peak / Q Capacity (%)"
-        ]
-        sewer_editor_df = df[sewer_columns].copy()
-        editable_columns = [
-            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m", "Downstream_Invert_m"
-        ]
-        disabled_columns = [col for col in sewer_columns if col not in editable_columns]
-
-        edited_sewer_data = st.data_editor(
-            sewer_editor_df,
-            column_config={
-                "Location": st.column_config.TextColumn("Location"),
-                "Pipe_ID": st.column_config.TextColumn("Pipe ID"),
-                "From_MH_ID": st.column_config.TextColumn("From MH ID"),
-                "To_MH_ID": st.column_config.TextColumn("To MH ID"),
-                "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
-                "Peak Design Flow Q(t)": st.column_config.NumberColumn("Peak Design Flow Q(t) (L/s)", format="%.2f"),
-                "Length_m": st.column_config.NumberColumn("Length (m)", min_value=0.0, step=1.0, format="%.2f"),
-                "Pipe_Diameter_mm": st.column_config.NumberColumn("Pipe Size (mm)", min_value=0.0, step=25.0, format="%.2f"),
-                "Upstream_Invert_m": st.column_config.NumberColumn("Upstream Invert (m)", step=0.001, format="%.3f"),
-                "Downstream_Invert_m": st.column_config.NumberColumn("Downstream Invert (m)", step=0.001, format="%.3f"),
-                "Pipe_Type": st.column_config.TextColumn("Type of Pipe"),
-                "Slope (%)": st.column_config.NumberColumn("Slope (%)", format="%.2f"),
-                "Capacity (L/s)": st.column_config.NumberColumn("Capacity (L/s), n=0.013", format="%.2f"),
-                "Full Flow Velocity (m/s)": st.column_config.NumberColumn("Full Flow Velocity (m/s)", format="%.2f"),
-                "Q Peak / Q Capacity (%)": st.column_config.NumberColumn("Q Peak / Q Capacity", format="%.2f%%")
-            },
-            disabled=disabled_columns,
-            use_container_width=True,
-            hide_index=True,
-            key="sewer_data_editor"
-        )
-
-        # Bring the edited input fields back into the main data frame and recalculate.
-        for col in editable_columns:
-            df[col] = pd.to_numeric(edited_sewer_data[col], errors="coerce").fillna(0)
-        df = calculate_hydraulics(df, n)
-
-        # =====================================================
         # FORMATTING / STYLING HELPERS
         # =====================================================
 
@@ -498,6 +457,80 @@ if uploaded_file is not None:
                 .map(capacity_ratio_style, subset=["Q Peak / Q Capacity (%)"])
                 .format(formats)
             )
+
+        # =====================================================
+        # SEWER DATA TABLE (EDITABLE INPUTS)
+        # =====================================================
+
+        st.subheader("Sewer Data")
+        st.caption(
+            "Edit Length, Pipe Size, and invert elevations. "
+            "Hydraulic results and the Results table recalculate automatically."
+        )
+
+        id_columns = [
+            "Location", "Pipe_ID", "From_MH_ID", "To_MH_ID", "Subcatchment_ID"
+        ]
+        sewer_columns = id_columns + [
+            "Peak Design Flow Q(t)",
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m",
+            "Pipe_Type",
+            "Slope (%)",
+            "Capacity (L/s)",
+            "Full Flow Velocity (m/s)",
+            "Q Peak / Q Capacity (%)"
+        ]
+        sewer_editor_df = df[sewer_columns].copy()
+        disabled_columns = [col for col in sewer_columns if col not in editable_columns]
+
+        sewer_editor_formats = {
+            col: "{:.2f}"
+            for col in sewer_editor_df.select_dtypes(include=[np.number]).columns
+        }
+        sewer_editor_formats.update({
+            "Upstream_Invert_m": "{:.3f}",
+            "Downstream_Invert_m": "{:.3f}",
+            "Q Peak / Q Capacity (%)": "{:.2f}%"
+        })
+        styled_sewer_editor_df = (
+            sewer_editor_df.style
+            .map(velocity_style, subset=["Full Flow Velocity (m/s)"])
+            .map(capacity_ratio_style, subset=["Q Peak / Q Capacity (%)"])
+            .format(sewer_editor_formats)
+        )
+
+        edited_sewer_data = st.data_editor(
+            styled_sewer_editor_df,
+            column_config={
+                "Location": st.column_config.TextColumn("Location"),
+                "Pipe_ID": st.column_config.TextColumn("Pipe ID"),
+                "From_MH_ID": st.column_config.TextColumn("From MH ID"),
+                "To_MH_ID": st.column_config.TextColumn("To MH ID"),
+                "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
+                "Peak Design Flow Q(t)": st.column_config.NumberColumn("Peak Design Flow Q(t) (L/s)", format="%.2f"),
+                "Length_m": st.column_config.NumberColumn("Length (m)", min_value=0.0, step=1.0, format="%.2f"),
+                "Pipe_Diameter_mm": st.column_config.NumberColumn("Pipe Size (mm)", min_value=0.0, step=25.0, format="%.2f"),
+                "Upstream_Invert_m": st.column_config.NumberColumn("Upstream Invert (m)", step=0.001, format="%.3f"),
+                "Downstream_Invert_m": st.column_config.NumberColumn("Downstream Invert (m)", step=0.001, format="%.3f"),
+                "Pipe_Type": st.column_config.TextColumn("Type of Pipe"),
+                "Slope (%)": st.column_config.NumberColumn("Slope (%)", format="%.2f"),
+                "Capacity (L/s)": st.column_config.NumberColumn("Capacity (L/s), n=0.013", format="%.2f"),
+                "Full Flow Velocity (m/s)": st.column_config.NumberColumn("Full Flow Velocity (m/s)", format="%.2f"),
+                "Q Peak / Q Capacity (%)": st.column_config.NumberColumn("Q Peak / Q Capacity", format="%.2f%%")
+            },
+            disabled=disabled_columns,
+            use_container_width=True,
+            hide_index=True,
+            key="sewer_data_editor"
+        )
+
+        # Bring the edited input fields back into the main data frame and recalculate.
+        for col in editable_columns:
+            df[col] = pd.to_numeric(edited_sewer_data[col], errors="coerce").fillna(0)
+        df = calculate_hydraulics(df, n)
 
         # Preserve full precision for calculations; apply display formatting in tables.
         # =====================================================
