@@ -428,12 +428,12 @@ if uploaded_file is not None:
         )
 
         # Peak design flow / pipe capacity
-        df["Q Peak / Q Capacity"] = np.where(
+        df["Q Peak / Q Capacity (%)"] = np.where(
             df["Capacity (L/s)"] > 0,
             (
                 df["Peak Design Flow Q(t)"]
                 / df["Capacity (L/s)"]
-            ),
+            ) * 100,
             np.nan
         )
 
@@ -454,7 +454,7 @@ if uploaded_file is not None:
             "Slope (%)",
             "Capacity (L/s)",
             "Full Flow Velocity (m/s)",
-            "Q Peak / Q Capacity"
+            "Q Peak / Q Capacity (%)"
         ]
 
         df[flow_cols] = df[flow_cols].round(2)
@@ -478,11 +478,19 @@ if uploaded_file is not None:
             "Peak Design Flow Q(t)",
             "Capacity (L/s)",
             "Full Flow Velocity (m/s)",
-            "Q Peak / Q Capacity"
+            "Q Peak / Q Capacity (%)"
         ]
 
+        hydraulic_results = df[hydraulic_columns].copy()
+
         st.dataframe(
-            df[hydraulic_columns],
+            hydraulic_results.style
+            .map(
+                lambda value: "color: red; font-weight: bold"
+                if pd.notna(value) and value >= 80 else "",
+                subset=["Q Peak / Q Capacity (%)"]
+            )
+            .format({"Q Peak / Q Capacity (%)": "{:.2f}%"}),
             use_container_width=True,
             hide_index=True
         )
@@ -517,7 +525,7 @@ if uploaded_file is not None:
             "Slope (%)",
             "Capacity (L/s)",
             "Full Flow Velocity (m/s)",
-            "Q Peak / Q Capacity"
+            "Q Peak / Q Capacity (%)"
         ]
 
         results = df[result_columns].copy()
@@ -534,7 +542,13 @@ if uploaded_file is not None:
         st.subheader("Complete Design Results")
 
         st.dataframe(
-            results,
+            results.style
+            .map(
+                lambda value: "color: red; font-weight: bold"
+                if pd.notna(value) and value >= 80 else "",
+                subset=["Q Peak / Q Capacity (%)"]
+            )
+            .format({"Q Peak / Q Capacity (%)": "{:.2f}%"}),
             use_container_width=True,
             hide_index=True
         )
@@ -566,7 +580,13 @@ if uploaded_file is not None:
         # DOWNLOAD RESULTS
         # =====================================================
 
-        csv_data = results.to_csv(index=False)
+        # Export the ratio as a percentage string, e.g. "80.00%"
+        export_results = results.copy()
+        export_results["Q Peak / Q Capacity (%)"] = (
+            export_results["Q Peak / Q Capacity (%)"]
+            .map(lambda value: f"{value:.2f}%" if pd.notna(value) else "")
+        )
+        csv_data = export_results.to_csv(index=False)
 
         st.download_button(
             label="Download Sewer Design CSV",
