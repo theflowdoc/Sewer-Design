@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import hashlib
 
 # =====================================================
 # PAGE SETUP
@@ -110,19 +111,24 @@ if uploaded_file is not None:
             elif "subc" in c:
                 rename_map[col] = "Subcatchment_ID"
 
-            elif c in ["pop", "population per ha"]:
+            elif (
+                c in ["pop", "population per ha", "population/ha", "population per hectare", "pop/ha"]
+                or (("pop" in c or "population" in c) and ("/ha" in c or "per ha" in c or "hectare" in c))
+            ):
                 rename_map[col] = "Population_per_ha"
-
-            elif c in ["area", "area (ha)"]:
-                rename_map[col] = "Residential_Area_ha"
 
             elif "industrial" in c:
                 rename_map[col] = "Industrial_Area_ha"
 
+            elif c in ["area", "area (ha)", "residential area", "residential area (ha)"] or (
+                "residential" in c and "area" in c
+            ):
+                rename_map[col] = "Residential_Area_ha"
+
             elif "length" in c:
                 rename_map[col] = "Length_m"
 
-            elif "diameter" in c:
+            elif "diameter" in c or c in ["pipe size", "pipe size (mm)", "diameter (mm)"]:
                 rename_map[col] = "Pipe_Diameter_mm"
 
             elif "upstream invert" in c:
@@ -247,7 +253,7 @@ if uploaded_file is not None:
             ).fillna(0)
 
         # =====================================================
-        # APPLY POPULATION TABLE EDITS BEFORE RECALCULATING
+        # PERSIST INPUTS FROM THE UPLOADED CSV AND APP EDITORS
         # =====================================================
 
         population_editable_columns = [
@@ -255,30 +261,72 @@ if uploaded_file is not None:
             "Residential_Area_ha",
             "Industrial_Area_ha"
         ]
-        population_editor_state = st.session_state.get("population_data_editor", {})
-        population_edited_rows = (
-            population_editor_state.get("edited_rows", {})
-            if isinstance(population_editor_state, dict) else {}
-        )
-        for row_index, changes in population_edited_rows.items():
-            try:
-                row_index = int(row_index)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= row_index < len(df):
-                for col in population_editable_columns:
-                    if col in changes:
-                        df.at[row_index, col] = pd.to_numeric(
-                            pd.Series([changes[col]]), errors="coerce"
-                        ).fillna(0).iloc[0]
+        editable_columns = [
+            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m", "Downstream_Invert_m"
+        ]
+
+        # Keep a canonical working copy so edits made in the app are not replaced
+        # by the original CSV on the next Streamlit rerun. A new CSV resets it.
+        upload_signature = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+        if st.session_state.get("upload_signature") != upload_signature:
+            st.session_state["upload_signature"] = upload_signature
+            st.session_state["design_inputs_df"] = df.copy(deep=True)
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
+        elif "design_inputs_df" not in st.session_state:
+            st.session_state["design_inputs_df"] = df.copy(deep=True)
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
+
+        # The working copy contains the most recently edited values, not values
+        # re-read from the CSV. All calculations below use this working copy.
+        df = st.session_state["design_inputs_df"].copy(deep=True)
+
+        def save_editor_changes(editor_key, columns):
+            """Merge widget edits into the persistent input dataframe."""
+            editor_state = st.session_state.get(editor_key, {})
+            edited_rows = (
+                editor_state.get("edited_rows", {})
+                if isinstance(editor_state, dict) else {}
+            )
+            working = st.session_state.get("design_inputs_df")
+            if working is None:
+                return
+
+            working = working.copy(deep=True)
+            for row_index, changes in edited_rows.items():
+                try:
+                    row_index = int(row_index)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= row_index < len(working):
+                    for col in columns:
+                        if col in changes:
+                            value = pd.to_numeric(
+                                pd.Series([changes[col]]), errors="coerce"
+                            ).iloc[0]
+                            working.at[row_index, col] = 0.0 if pd.isna(value) else value
+
+            st.session_state["design_inputs_df"] = working
+            # Re-key both editors after a change. This clears stale widget deltas
+            # while preserving all current values in design_inputs_df.
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
 
         # =====================================================
         # POPULATION CALCULATIONS
         # =====================================================
 
-        df["Residential Population"] = (
-            df["Population_per_ha"]
-            * df["Residential_Area_ha"]
+        # Population counts/density are whole people. Round them upward, then use
+        # those whole-number values consistently in flow calculations and exports.
+        df["Population_per_ha"] = np.ceil(
+            pd.to_numeric(df["Population_per_ha"], errors="coerce").fillna(0).clip(lower=0)
+        )
+        df["Residential Population"] = np.ceil(
+            df["Population_per_ha"] * df["Residential_Area_ha"]
         )
 
         df["Area Cumulative (ha)"] = (
@@ -373,27 +421,7 @@ if uploaded_file is not None:
             )
             return data
 
-        # Re-apply the latest edits before calculating hydraulics. Streamlit reruns
-        # the script after each data_editor change; reading edited_rows here means
-        # the calculated columns are refreshed in the editor on that same rerun.
-        editable_columns = [
-            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m", "Downstream_Invert_m"
-        ]
-        editor_state = st.session_state.get("sewer_data_editor", {})
-        edited_rows = editor_state.get("edited_rows", {}) if isinstance(editor_state, dict) else {}
-        for row_index, changes in edited_rows.items():
-            try:
-                row_index = int(row_index)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= row_index < len(df):
-                for col in editable_columns:
-                    if col in changes:
-                        df.at[row_index, col] = pd.to_numeric(
-                            pd.Series([changes[col]]), errors="coerce"
-                        ).fillna(0).iloc[0]
-
-        # Recalculate using the current editable values before rendering tables.
+        # Recalculate using the current persistent editable values before rendering tables.
         df = calculate_hydraulics(df, n)
 
         id_columns = [
@@ -420,14 +448,15 @@ if uploaded_file is not None:
             col: "{:.2f}"
             for col in population_results.select_dtypes(include=[np.number]).columns
         }
-        population_formats["Population_per_ha"] = "{:.2f}"
-        population_formats["Residential_Area_ha"] = "{:.2f}"
-        population_formats["Industrial_Area_ha"] = "{:.2f}"
+        for col in ["Population_per_ha", "Residential Population", "Population Cumulative"]:
+            population_formats[col] = "{:.0f}"
         styled_population_results = population_results.style.format(population_formats)
         population_disabled_columns = [
             col for col in population_columns
             if col not in population_editable_columns
         ]
+        editor_generation = st.session_state.get("editor_generation", 0)
+        population_editor_key = f"population_data_editor_{editor_generation}"
         edited_population_data = st.data_editor(
             styled_population_results,
             column_config={
@@ -437,19 +466,19 @@ if uploaded_file is not None:
                 "To_MH_ID": st.column_config.TextColumn("To MH ID"),
                 "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
                 "Population_per_ha": st.column_config.NumberColumn(
-                    "Population per ha", min_value=0.0, step=10.0, format="%.2f"
+                    "Population per ha", min_value=0, step=1, format="%.0f"
                 ),
                 "Residential_Area_ha": st.column_config.NumberColumn(
                     "Residential Area (ha)", min_value=0.0, step=0.1, format="%.2f"
                 ),
                 "Residential Population": st.column_config.NumberColumn(
-                    "Residential Population", format="%.2f"
+                    "Residential Population", format="%.0f"
                 ),
                 "Area Cumulative (ha)": st.column_config.NumberColumn(
                     "Area Cumulative (ha)", format="%.2f"
                 ),
                 "Population Cumulative": st.column_config.NumberColumn(
-                    "Population Cumulative", format="%.2f"
+                    "Population Cumulative", format="%.0f"
                 ),
                 "Industrial_Area_ha": st.column_config.NumberColumn(
                     "Industrial Area (ha)", min_value=0.0, step=0.1, format="%.2f"
@@ -464,7 +493,9 @@ if uploaded_file is not None:
             disabled=population_disabled_columns,
             use_container_width=True,
             hide_index=True,
-            key="population_data_editor"
+            key=population_editor_key,
+            on_change=save_editor_changes,
+            args=(population_editor_key, population_editable_columns)
         )
 
         # =====================================================
@@ -518,6 +549,9 @@ if uploaded_file is not None:
                 "Downstream_Invert_m": "{:.3f}",
                 "Q Peak / Q Capacity (%)": "{:.2f}%"
             })
+            for col in ["Population_per_ha", "Residential Population", "Population Cumulative"]:
+                if col in frame.columns:
+                    formats[col] = "{:.0f}"
             return (
                 frame.style
                 .map(velocity_style, subset=["Full Flow Velocity (m/s)"])
@@ -569,6 +603,8 @@ if uploaded_file is not None:
             .format(sewer_editor_formats)
         )
 
+        editor_generation = st.session_state.get("editor_generation", 0)
+        sewer_editor_key = f"sewer_data_editor_{editor_generation}"
         edited_sewer_data = st.data_editor(
             styled_sewer_editor_df,
             column_config={
@@ -591,13 +627,14 @@ if uploaded_file is not None:
             disabled=disabled_columns,
             use_container_width=True,
             hide_index=True,
-            key="sewer_data_editor"
+            key=sewer_editor_key,
+            on_change=save_editor_changes,
+            args=(sewer_editor_key, editable_columns)
         )
 
-        # Bring the edited input fields back into the main data frame and recalculate.
-        for col in editable_columns:
-            df[col] = pd.to_numeric(edited_sewer_data[col], errors="coerce").fillna(0)
-        df = calculate_hydraulics(df, n)
+        # All current editable values have already been merged into the persistent
+        # dataframe by the editor callback before this rerun. Calculations above
+        # therefore feed the same current values into Results and the CSV export.
 
         # Preserve full precision for calculations; apply display formatting in tables.
         # =====================================================
@@ -670,8 +707,15 @@ if uploaded_file is not None:
         # =====================================================
 
         export_results = results.copy()
+        population_count_columns = [
+            "Population_per_ha", "Residential Population", "Population Cumulative"
+        ]
         for col in export_results.select_dtypes(include=[np.number]).columns:
-            if col in ["Upstream_Invert_m", "Downstream_Invert_m"]:
+            if col in population_count_columns:
+                export_results[col] = export_results[col].map(
+                    lambda value: f"{value:.0f}" if pd.notna(value) else ""
+                )
+            elif col in ["Upstream_Invert_m", "Downstream_Invert_m"]:
                 export_results[col] = export_results[col].map(
                     lambda value: f"{value:.3f}" if pd.notna(value) else ""
                 )
