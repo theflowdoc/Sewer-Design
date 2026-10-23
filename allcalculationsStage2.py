@@ -16,6 +16,57 @@ st.set_page_config(
 st.title("Sanitary Sewer Design Tool")
 
 # =====================================================
+# START HERE: DOWNLOAD THE INPUT TEMPLATE
+# =====================================================
+
+st.info(
+    "**Start here:** Download the CSV template below, fill in your initial "
+    "sewer and population information, save it as a CSV file, and then upload "
+    "it to begin the calculations. Keep the column headers exactly as provided. "
+    "The app uses these predefined headers to identify each field."
+)
+
+# Keep these headers stable: the app's column-mapping logic uses them to
+# recognize the input fields. CSV files themselves cannot lock header cells,
+# so the instructions above ask users not to rename them.
+template_columns = [
+    "Location",
+    "Pipe ID",
+    "From",
+    "To",
+    "Subcatchment Area ID",
+    "Population per ha",
+    "Residential Area (ha)",
+    "Industrial Area (ha)",
+    "Length (m)",
+    "Pipe Diameter (mm)",
+    "Upstream Invert (m)",
+    "Downstream Invert (m)",
+    "Type of Pipe",
+]
+
+# Include a few blank rows so users can start entering records immediately.
+template_df = pd.DataFrame(
+    [{column: "" for column in template_columns} for _ in range(5)],
+    columns=template_columns,
+)
+template_csv = template_df.to_csv(index=False)
+
+st.download_button(
+    label="Download CSV Input Template",
+    data=template_csv,
+    file_name="sanitary_sewer_input_template.csv",
+    mime="text/csv",
+    help="Download this file, enter your initial data, and upload the completed CSV below.",
+)
+
+st.caption(
+    "Required input fields: Location, Pipe ID, From, To, Subcatchment Area ID, "
+    "Population per ha, and Residential Area (ha). Other fields can be filled "
+    "when applicable; missing optional numeric values default to zero."
+)
+
+# =====================================================
 # DESIGN PARAMETERS
 # =====================================================
 
@@ -53,8 +104,9 @@ n = st.sidebar.number_input(
 # =====================================================
 
 uploaded_file = st.file_uploader(
-    "Upload CSV",
-    type=["csv"]
+    "Upload your completed CSV template to begin calculations",
+    type=["csv"],
+    help="Use the downloaded template and keep its column headers unchanged.",
 )
 
 # =====================================================
