@@ -356,17 +356,6 @@ if uploaded_file is not None:
                 errors="coerce"
             ).fillna(0)
 
-        # Keep editable area and density fields as floats even if the uploaded
-        # CSV happens to contain only integers. This allows decimal edits
-        # (for example, 0.25 ha) without an integer-dtype assignment error.
-        decimal_input_columns = [
-            "Population_per_ha",
-            "Residential_Area_ha",
-            "Industrial_Area_ha",
-        ]
-        for col in decimal_input_columns:
-            df[col] = df[col].astype("float64")
-
         # =====================================================
         # PERSIST INPUTS FROM THE UPLOADED CSV AND APP EDITORS
         # =====================================================
@@ -398,11 +387,6 @@ if uploaded_file is not None:
         # The working copy contains the most recently edited values, not values
         # re-read from the CSV. All calculations below use this working copy.
         df = st.session_state["design_inputs_df"].copy(deep=True)
-        for col in decimal_input_columns:
-            if col in df.columns:
-                df[col] = pd.to_numeric(
-                    df[col], errors="coerce"
-                ).fillna(0).astype("float64")
 
         def save_editor_changes(editor_key, columns):
             """Merge widget edits into the persistent input dataframe."""
@@ -416,12 +400,6 @@ if uploaded_file is not None:
                 return
 
             working = working.copy(deep=True)
-            for col in columns:
-                if col in working.columns:
-                    working[col] = pd.to_numeric(
-                        working[col], errors="coerce"
-                    ).fillna(0).astype("float64")
-
             for row_index, changes in edited_rows.items():
                 try:
                     row_index = int(row_index)
@@ -433,9 +411,7 @@ if uploaded_file is not None:
                             value = pd.to_numeric(
                                 pd.Series([changes[col]]), errors="coerce"
                             ).iloc[0]
-                            working.at[row_index, col] = (
-                                0.0 if pd.isna(value) else float(value)
-                            )
+                            working.at[row_index, col] = 0.0 if pd.isna(value) else value
 
             st.session_state["design_inputs_df"] = working
             # Re-key both editors after a change. This clears stale widget deltas
@@ -593,9 +569,13 @@ if uploaded_file is not None:
         )
 
 
+        # Extraneous flow is based on the local residential area plus the
+        # cumulative industrial/commercial area from this pipe and all upstream
+        # connected branches. Units: ha * (L/ha/s) = L/s.
         df["Peak Extraneous Flow Q(i)"] = (
-            df["Total Area (ha)"] * i
-        )
+            df["Residential_Area_ha"]
+            + df["Industrial / Commercial Cumulative Area (ha)"]
+        ) * i
 
         df["Peak Design Flow Q(t)"] = (
             df["Peak Population Flow Q(p)"]
@@ -1085,3 +1065,4 @@ if uploaded_file is not None:
 
 else:
     st.info("Upload a CSV file to begin.")
+
