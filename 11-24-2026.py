@@ -32,15 +32,14 @@ hydraulic performance for each pipe.
 - **CSV input template:** Download a standardized template, enter the initial
   project data, and upload the completed file.
 - **Network diagram:** Draws the connected manholes as labeled nodes and the
-  pipes as directed connections labeled with Pipe IDs, making branch junctions
-  and upstream/downstream relationships easier to review.
+  pipes as directed connections labeled with Pipe IDs and Location, making
+  branch junctions and upstream/downstream relationships easier to review.
 - **Branched network accumulation:** Uses the upstream (`From`) and downstream
-  (`To`) manhole IDs to combine residential population, residential area, and
-  industrial area from connected upstream pipes at shared manholes, independent
-  of CSV row order.
+  (`To`) manhole IDs to combine residential population and total area from
+  connected upstream pipes at shared manholes, independent of CSV row order.
 - **Population calculations:** Calculates local residential population from
-  population density and residential area, rounds population counts upward to
-  whole people, and totals cumulative upstream population.
+  population density and residential area, rounds population counts to the
+  nearest whole person, and totals cumulative upstream population.
 - **Sewage flow calculations:** Calculates the Harmon peaking factor, peak
   population flow, peak ICI flow, extraneous flow, and total peak design flow
   using the design parameters provided in the sidebar.
@@ -419,18 +418,17 @@ if uploaded_file is not None:
             )
 
         # =====================================================
-        # POPULATION CALCULATIONS BY CONNECTED SEWER NETWORK
+        # POPULATION AND TOTAL-AREA CALCULATIONS BY CONNECTED SEWER NETWORK
         # =====================================================
 
-        # Each row's residential/industrial area is treated as the LOCAL
-        # contribution assigned to that pipe. For every pipe, cumulative loads
-        # include its local contribution plus all upstream pipes whose To_MH_ID
-        # connects to this pipe's From_MH_ID. This works regardless of CSV row
-        # order and automatically combines tributary branches at shared manholes.
+        # Each row's residential and industrial areas are local contributions.
+        # Total Area is accumulated through the directed From -> To network.
+        # This combines all upstream branches at shared manholes, independent
+        # of CSV row order.
         #
-        # Population counts/density are whole people. Round upward before using
-        # the values in flow calculations.
-        df["Population_per_ha"] = np.ceil(
+        # Population density remains an input rate. Calculated population counts
+        # are rounded to the nearest whole person before flow calculations.
+        df["Population_per_ha"] = (
             pd.to_numeric(df["Population_per_ha"], errors="coerce")
             .fillna(0)
             .clip(lower=0)
@@ -445,16 +443,15 @@ if uploaded_file is not None:
             .fillna(0)
             .clip(lower=0)
         )
-        df["Residential Population"] = np.ceil(
-            df["Population_per_ha"] * df["Residential_Area_ha"]
+        df["Residential Population"] = np.floor(
+            df["Population_per_ha"] * df["Residential_Area_ha"] + 0.5
         ).astype(int)
 
         def calculate_network_cumulative(data):
-            """Accumulate local pipe loads through the directed From -> To network.
+            """Accumulate population and total area through the sewer network.
 
-            Uses a topological pass rather than CSV row order, so branches can
-            join at shared manholes and large networks do not depend on recursion
-            depth.
+            A topological pass ensures that tributary branches are combined
+            before their downstream pipes are processed.
             """
             data = data.copy()
             row_count = len(data)
@@ -468,33 +465,40 @@ if uploaded_file is not None:
             from_nodes = [clean_node(value) for value in data["From_MH_ID"]]
             to_nodes = [clean_node(value) for value in data["To_MH_ID"]]
 
-            # Index pipes by their downstream manhole. Any pipe ending at the
-            # current pipe's From manhole is an upstream contributing pipe.
             incoming_pipes = {}
             for pipe_index, to_node in enumerate(to_nodes):
                 if to_node is not None:
                     incoming_pipes.setdefault(to_node, []).append(pipe_index)
 
-            parents = []
             downstream_children = [[] for _ in range(row_count)]
             pending_parent_count = [0] * row_count
+
             for child_index, from_node in enumerate(from_nodes):
-                upstream_indices = incoming_pipes.get(from_node, []) if from_node is not None else []
-                upstream_indices = [idx for idx in upstream_indices if idx != child_index]
-                parents.append(upstream_indices)
+                upstream_indices = (
+                    incoming_pipes.get(from_node, []) if from_node is not None else []
+                )
+                upstream_indices = [
+                    idx for idx in upstream_indices if idx != child_index
+                ]
                 pending_parent_count[child_index] = len(upstream_indices)
                 for parent_index in upstream_indices:
                     downstream_children[parent_index].append(child_index)
 
-            cumulative_population = data["Residential Population"].astype(float).tolist()
-            cumulative_res_area = data["Residential_Area_ha"].astype(float).tolist()
-            cumulative_ind_area = data["Industrial_Area_ha"].astype(float).tolist()
+            cumulative_population = (
+                data["Residential Population"].astype(int).tolist()
+            )
+            local_total_area = (
+                data["Residential_Area_ha"] + data["Industrial_Area_ha"]
+            )
+            cumulative_total_area = local_total_area.astype(float).tolist()
 
-            # Start with pipes that have no upstream pipes. Propagate each pipe's
-            # full accumulated load into every pipe leaving its downstream MH.
-            queue = [idx for idx, count in enumerate(pending_parent_count) if count == 0]
+            queue = [
+                idx for idx, count in enumerate(pending_parent_count)
+                if count == 0
+            ]
             processed_count = 0
             queue_position = 0
+
             while queue_position < len(queue):
                 parent_index = queue[queue_position]
                 queue_position += 1
@@ -502,15 +506,19 @@ if uploaded_file is not None:
 
                 for child_index in downstream_children[parent_index]:
                     cumulative_population[child_index] += cumulative_population[parent_index]
-                    cumulative_res_area[child_index] += cumulative_res_area[parent_index]
-                    cumulative_ind_area[child_index] += cumulative_ind_area[parent_index]
+                    cumulative_total_area[child_index] += cumulative_total_area[parent_index]
                     pending_parent_count[child_index] -= 1
                     if pending_parent_count[child_index] == 0:
                         queue.append(child_index)
 
             if processed_count != row_count:
-                cycle_indices = [idx for idx, count in enumerate(pending_parent_count) if count > 0]
-                cycle_pipe_ids = data.iloc[cycle_indices]["Pipe_ID"].astype(str).tolist()
+                cycle_indices = [
+                    idx for idx, count in enumerate(pending_parent_count)
+                    if count > 0
+                ]
+                cycle_pipe_ids = (
+                    data.iloc[cycle_indices]["Pipe_ID"].astype(str).tolist()
+                )
                 raise ValueError(
                     "A loop/cycle was detected in the pipe network. Check the From and "
                     "To manhole IDs for these pipe records: "
@@ -518,9 +526,8 @@ if uploaded_file is not None:
                     "contain directed cycles."
                 )
 
-            data["Population Cumulative"] = np.ceil(cumulative_population).astype(int)
-            data["Area Cumulative (ha)"] = cumulative_res_area
-            data["Industrial Cumulative Area (ha)"] = cumulative_ind_area
+            data["Population Cumulative"] = cumulative_population
+            data["Total Area (ha)"] = cumulative_total_area
             return data
 
         df = calculate_network_cumulative(df)
@@ -543,15 +550,11 @@ if uploaded_file is not None:
         df["Peak ICI Flow Q(p)"] = (
             ici_peak
             * commercial_domestic_sewage
-            * df["Industrial Cumulative Area (ha)"]
+            * df["Total Area (ha)"]
             * 10000
             / 86400
         )
 
-        df["Total Area (ha)"] = (
-            df["Area Cumulative (ha)"]
-            + df["Industrial Cumulative Area (ha)"]
-        )
 
         df["Peak Extraneous Flow Q(i)"] = (
             df["Total Area (ha)"] * i
@@ -619,8 +622,8 @@ if uploaded_file is not None:
         st.subheader("Manhole and Pipe Network Diagram")
         st.caption(
             "Each oval represents a manhole. Arrows show the pipe direction "
-            "from the `From` manhole to the `To` manhole, and each arrow is "
-            "labeled with its Pipe ID. Shared manhole IDs are drawn as one node, "
+            "from the `From` manhole to the `To` manhole. Each arrow displays "
+            "the Pipe ID, with Location directly below it. Shared manhole IDs are drawn as one node, "
             "so connected branches meet at the same location in the diagram."
         )
 
@@ -645,14 +648,15 @@ if uploaded_file is not None:
         from_values = [diagram_text(value) for value in df["From_MH_ID"]]
         to_values = [diagram_text(value) for value in df["To_MH_ID"]]
         pipe_values = [diagram_text(value, default="(Pipe ID missing)") for value in df["Pipe_ID"]]
+        location_values = [diagram_text(value, default="(Location missing)") for value in df["Location"]]
 
         manhole_labels = []
         manhole_node_ids = {}
         valid_edge_rows = []
         missing_connection_rows = []
 
-        for row_index, (from_mh, to_mh, pipe_id) in enumerate(
-            zip(from_values, to_values, pipe_values)
+        for row_index, (from_mh, to_mh, pipe_id, location) in enumerate(
+            zip(from_values, to_values, pipe_values, location_values)
         ):
             if not from_mh or not to_mh:
                 missing_connection_rows.append({
@@ -672,6 +676,7 @@ if uploaded_file is not None:
                 manhole_node_ids[from_mh],
                 manhole_node_ids[to_mh],
                 pipe_id,
+                location,
                 row_index,
             ))
 
@@ -697,12 +702,13 @@ if uploaded_file is not None:
                     f'  {generated_id} [label="{dot_quote("MH\n" + manhole_id)}"];'
                 )
 
-            for from_node, to_node, pipe_id, row_index in valid_edge_rows:
-                edge_label = (
+            for from_node, to_node, pipe_id, location, row_index in valid_edge_rows:
+                pipe_label = (
                     f"Pipe ID: {pipe_id}"
                     if pipe_id and pipe_id != "(Pipe ID missing)"
                     else f"Pipe row {row_index + 1}"
                 )
+                edge_label = f"{pipe_label}\nLocation: {location}"
                 dot_lines.append(
                     f'  {from_node} -> {to_node} [label="{dot_quote(edge_label)}"];'
                 )
@@ -737,10 +743,8 @@ if uploaded_file is not None:
             "Population_per_ha",
             "Residential_Area_ha",
             "Residential Population",
-            "Area Cumulative (ha)",
-            "Population Cumulative",
             "Industrial_Area_ha",
-            "Industrial Cumulative Area (ha)",
+            "Population Cumulative",
             "Total Area (ha)"
         ]
         population_results = df[population_columns].copy()
@@ -748,7 +752,7 @@ if uploaded_file is not None:
             col: "{:.2f}"
             for col in population_results.select_dtypes(include=[np.number]).columns
         }
-        for col in ["Population_per_ha", "Residential Population", "Population Cumulative"]:
+        for col in ["Residential Population", "Population Cumulative"]:
             population_formats[col] = "{:.0f}"
         styled_population_results = population_results.style.format(population_formats)
         population_disabled_columns = [
@@ -766,7 +770,7 @@ if uploaded_file is not None:
                 "To_MH_ID": st.column_config.TextColumn("To MH ID"),
                 "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
                 "Population_per_ha": st.column_config.NumberColumn(
-                    "Population per ha", min_value=0, step=1, format="%.0f"
+                    "Population per ha", min_value=0.0, step=1.0, format="%.2f"
                 ),
                 "Residential_Area_ha": st.column_config.NumberColumn(
                     "Residential Area (ha)", min_value=0.0, step=0.1, format="%.2f"
@@ -774,17 +778,11 @@ if uploaded_file is not None:
                 "Residential Population": st.column_config.NumberColumn(
                     "Residential Population", format="%.0f"
                 ),
-                "Area Cumulative (ha)": st.column_config.NumberColumn(
-                    "Area Cumulative (ha)", format="%.2f"
-                ),
-                "Population Cumulative": st.column_config.NumberColumn(
-                    "Population Cumulative", format="%.0f"
-                ),
                 "Industrial_Area_ha": st.column_config.NumberColumn(
                     "Industrial Area (ha)", min_value=0.0, step=0.1, format="%.2f"
                 ),
-                "Industrial Cumulative Area (ha)": st.column_config.NumberColumn(
-                    "Industrial Cumulative Area (ha)", format="%.2f"
+                "Population Cumulative": st.column_config.NumberColumn(
+                    "Population Cumulative", format="%.0f"
                 ),
                 "Total Area (ha)": st.column_config.NumberColumn(
                     "Total Area (ha)", format="%.2f"
@@ -849,7 +847,7 @@ if uploaded_file is not None:
                 "Downstream_Invert_m": "{:.3f}",
                 "Q Peak / Q Capacity (%)": "{:.2f}%"
             })
-            for col in ["Population_per_ha", "Residential Population", "Population Cumulative"]:
+            for col in ["Residential Population", "Population Cumulative"]:
                 if col in frame.columns:
                     formats[col] = "{:.0f}"
             return (
@@ -945,10 +943,8 @@ if uploaded_file is not None:
             "Population_per_ha",
             "Residential_Area_ha",
             "Residential Population",
-            "Area Cumulative (ha)",
-            "Population Cumulative",
             "Industrial_Area_ha",
-            "Industrial Cumulative Area (ha)",
+            "Population Cumulative",
             "Total Area (ha)",
             "Peaking Factor M",
             "Peak Population Flow Q(p)",
@@ -1008,7 +1004,7 @@ if uploaded_file is not None:
 
         export_results = results.copy()
         population_count_columns = [
-            "Population_per_ha", "Residential Population", "Population Cumulative"
+            "Residential Population", "Population Cumulative"
         ]
         for col in export_results.select_dtypes(include=[np.number]).columns:
             if col in population_count_columns:
