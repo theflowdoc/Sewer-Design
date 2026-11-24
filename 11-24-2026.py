@@ -35,14 +35,17 @@ hydraulic performance for each pipe.
   pipes as directed connections labeled with Pipe IDs and Location, making
   branch junctions and upstream/downstream relationships easier to review.
 - **Branched network accumulation:** Uses the upstream (`From`) and downstream
-  (`To`) manhole IDs to combine residential population and total area from
-  connected upstream pipes at shared manholes, independent of CSV row order.
+  (`To`) manhole IDs to combine residential population, total area, and
+  industrial/commercial area from connected upstream pipes at shared manholes,
+  independent of CSV row order. Industrial/commercial cumulative area is
+  calculated separately so it can be used in the ICI peak-flow calculation.
 - **Population calculations:** Calculates local residential population from
   population density and residential area, rounds population counts to the
   nearest whole person, and totals cumulative upstream population.
 - **Sewage flow calculations:** Calculates the Harmon peaking factor, peak
-  population flow, peak ICI flow, extraneous flow, and total peak design flow
-  using the design parameters provided in the sidebar.
+  population flow, peak ICI flow based on cumulative industrial/commercial
+  area, extraneous flow, and total peak design flow using the design parameters
+  provided in the sidebar.
 - **Pipe hydraulic calculations:** Calculates pipe slope, Manning-based full-flow
   capacity, full-flow velocity, and peak-flow-to-capacity ratio.
 - **Interactive input tables:** Allows population density, residential area,
@@ -492,6 +495,11 @@ if uploaded_file is not None:
             )
             cumulative_total_area = local_total_area.astype(float).tolist()
 
+            # ICI area includes only the local industrial/commercial contribution.
+            # It is accumulated separately from residential area and total area.
+            local_ici_area = data["Industrial_Area_ha"].astype(float)
+            cumulative_ici_area = local_ici_area.tolist()
+
             queue = [
                 idx for idx, count in enumerate(pending_parent_count)
                 if count == 0
@@ -507,6 +515,7 @@ if uploaded_file is not None:
                 for child_index in downstream_children[parent_index]:
                     cumulative_population[child_index] += cumulative_population[parent_index]
                     cumulative_total_area[child_index] += cumulative_total_area[parent_index]
+                    cumulative_ici_area[child_index] += cumulative_ici_area[parent_index]
                     pending_parent_count[child_index] -= 1
                     if pending_parent_count[child_index] == 0:
                         queue.append(child_index)
@@ -528,6 +537,7 @@ if uploaded_file is not None:
 
             data["Population Cumulative"] = cumulative_population
             data["Total Area (ha)"] = cumulative_total_area
+            data["Industrial / Commercial Cumulative Area (ha)"] = cumulative_ici_area
             return data
 
         df = calculate_network_cumulative(df)
@@ -547,12 +557,15 @@ if uploaded_file is not None:
             / 86400
         )
 
+        # ICI peak flow uses cumulative industrial/commercial area only.
+        # Units: (ha * 10,000 m²/ha * L/d-m² * peaking factor) / (24 * 3600 s/d)
         df["Peak ICI Flow Q(p)"] = (
-            ici_peak
+            df["Industrial / Commercial Cumulative Area (ha)"]
             * commercial_domestic_sewage
-            * df["Total Area (ha)"]
             * 10000
-            / 86400
+            * ici_peak
+            / 24
+            / 3600
         )
 
 
@@ -739,11 +752,17 @@ if uploaded_file is not None:
         # =====================================================
 
         st.subheader("Population")
+        st.caption(
+            "Edit the local Industrial Area (ha) input. The Industrial / Commercial "
+            "Cumulative Area (ha) is calculated automatically by adding the local "
+            "industrial area from this pipe and all connected upstream branches."
+        )
         population_columns = id_columns + [
             "Population_per_ha",
             "Residential_Area_ha",
             "Residential Population",
             "Industrial_Area_ha",
+            "Industrial / Commercial Cumulative Area (ha)",
             "Population Cumulative",
             "Total Area (ha)"
         ]
@@ -781,6 +800,9 @@ if uploaded_file is not None:
                 "Industrial_Area_ha": st.column_config.NumberColumn(
                     "Industrial Area (ha)", min_value=0.0, step=0.1, format="%.2f"
                 ),
+                "Industrial / Commercial Cumulative Area (ha)": st.column_config.NumberColumn(
+                    "Industrial / Commercial Cumulative Area (ha)", format="%.2f"
+                ),
                 "Population Cumulative": st.column_config.NumberColumn(
                     "Population Cumulative", format="%.0f"
                 ),
@@ -802,6 +824,7 @@ if uploaded_file is not None:
 
         st.subheader("Flows")
         flow_columns = id_columns + [
+            "Industrial / Commercial Cumulative Area (ha)",
             "Peaking Factor M",
             "Peak Population Flow Q(p)",
             "Peak ICI Flow Q(p)",
@@ -944,6 +967,7 @@ if uploaded_file is not None:
             "Residential_Area_ha",
             "Residential Population",
             "Industrial_Area_ha",
+            "Industrial / Commercial Cumulative Area (ha)",
             "Population Cumulative",
             "Total Area (ha)",
             "Peaking Factor M",
