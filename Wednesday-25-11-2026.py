@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import hashlib
 from io import BytesIO
-pip install "python-docx>=1.1"
 
 # =====================================================
 # PAGE SETUP
@@ -1198,219 +1197,128 @@ if uploaded_file is not None:
         )
 
         # =====================================================
-        # PDF DESIGN REPORT
+        # HTML DESIGN REPORT (NO EXTRA PACKAGE REQUIRED)
         # =====================================================
 
-        def build_pdf_report():
-            from reportlab.lib import colors
-            from reportlab.lib.enums import TA_CENTER
-            from reportlab.lib.pagesizes import landscape, A4
-            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-            from reportlab.lib.units import mm
-            from reportlab.platypus import (
-                SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table,
-                TableStyle, KeepTogether
-            )
-            from xml.sax.saxutils import escape
+        import html
 
-            buffer = BytesIO()
-            page_size = landscape(A4)
-            doc = SimpleDocTemplate(
-                buffer, pagesize=page_size,
-                rightMargin=14*mm, leftMargin=14*mm,
-                topMargin=14*mm, bottomMargin=14*mm,
-                title="Sanitary Sewer Design Report"
-            )
-            styles = getSampleStyleSheet()
-            styles.add(ParagraphStyle(
-                name="ReportTitle", parent=styles["Title"],
-                alignment=TA_CENTER, fontSize=22, leading=27, spaceAfter=12
-            ))
-            styles.add(ParagraphStyle(
-                name="SmallCell", parent=styles["BodyText"],
-                fontSize=7, leading=8.5, wordWrap="CJK"
-            ))
-            styles.add(ParagraphStyle(
-                name="ReportBody", parent=styles["BodyText"],
-                fontSize=9, leading=12, spaceAfter=6
-            ))
-
-            def safe(value):
+        def html_escape(value):
+            try:
                 if pd.isna(value):
                     return "-"
-                return escape(str(value))
+            except (TypeError, ValueError):
+                pass
+            return html.escape(str(value))
 
-            def fmt(value, digits=2):
-                try:
-                    return f"{float(value):,.{digits}f}"
-                except (TypeError, ValueError):
-                    return "-"
+        def fmt_html(value, digits=2):
+            try:
+                return f"{float(value):,.{digits}f}"
+            except (TypeError, ValueError):
+                return "-"
 
-            story = []
-            # Cover page: app description and scope.
-            story.extend([
-                Spacer(1, 25*mm),
-                Paragraph("Sanitary Sewer Design Report", styles["ReportTitle"]),
-                Paragraph("Preliminary sanitary sewer network calculations", styles["Heading2"]),
-                Spacer(1, 8*mm),
-                Paragraph("<b>About this application</b>", styles["Heading2"]),
-                Paragraph(
-                    "This tool supports preliminary sanitary sewer network calculations. "
-                    "It reads pipe, manhole, population, area, and pipe geometry data from a CSV file, "
-                    "then calculates cumulative upstream contributions, estimated sewage flows, "
-                    "and hydraulic performance for each pipe.", styles["ReportBody"]),
-                Paragraph("<b>Main capabilities</b>", styles["Heading2"]),
-                Paragraph(
-                    "The app orders connected pipes upstream-to-downstream; accumulates residential "
-                    "population, residential area, and industrial/commercial area through connected "
-                    "branches; calculates peak population, ICI and extraneous flows; and evaluates "
-                    "Manning-based full-flow capacity, velocity, and peak-flow-to-capacity ratio. "
-                    "Editable input tables allow selected population, area, pipe length, diameter, "
-                    "and invert values to be changed in the app, with calculations refreshed from "
-                    "the current values.", styles["ReportBody"]),
-                Paragraph("<b>Diameter relationship</b>", styles["Heading2"]),
-                Paragraph(
-                    "Hydraulic calculations use D_calc = D_input / 25 * 25.4. The entered diameter "
-                    "is retained as the input value.", styles["ReportBody"]),
-                Paragraph("<b>Design reference and limitations</b>", styles["Heading2"]),
-                Paragraph(
-                    "The workflow and selected calculation methods are informed by the Ontario "
-                    "Ministry of the Environment's Design Guidelines for Sewage Works. This tool is "
-                    "a calculation aid; it does not implement every guideline requirement or certify "
-                    "design compliance. Confirm current provincial and municipal criteria, project "
-                    "conditions, assumptions, and results through appropriate engineering review. "
-                    "Reference: https://www.ontario.ca/document/design-guidelines-sewage-works-0",
-                    styles["ReportBody"]),
-                PageBreak()
+        parameter_rows = [
+            ("Average Daily Per Capita Flow (L/cap/day)", fmt_html(q)),
+            ("Extraneous Flow Rate (L/ha/s)", fmt_html(i)),
+            ("Commercial Domestic Sewage (L/d-m2)", fmt_html(commercial_domestic_sewage)),
+            ("Commercial / ICI Peaking Factor", fmt_html(ici_peak)),
+            ("Manning n", fmt_html(n)),
+            ("Velocity review criteria", "Flag <= 0.60 m/s; caution > 0.60 to 0.75 m/s; flag >= 3.00 m/s"),
+            ("Q Peak / Q Capacity review criterion", "Flag >= 80%"),
+        ]
+        total_rows = [
+            ("Total population used (persons)", f"{total_population:,}"),
+            ("Total residential area (ha)", fmt_html(df["Residential_Area_ha"].sum())),
+            ("Total industrial/commercial area (ha)", fmt_html(df["Industrial_Area_ha"].sum())),
+            ("Total length of new pipes (m)", fmt_html(total_new_pipe_length)),
+        ]
+
+        new_pipes = results[
+            results["Pipe_Type"].fillna("").astype(str).str.strip().str.lower()
+            .isin({"new", "new pipe", "proposed"})
+        ].copy()
+        schedule_headers = ["Pipe ID", "Location", "Diameter (mm)", "Capacity (L/s)",
+                           "Velocity (m/s)", "Q Peak / Q Capacity (%)", "Design check"]
+        schedule_rows = []
+        for _, row in new_pipes.iterrows():
+            velocity = row["Full Flow Velocity (m/s)"]
+            ratio = row["Q Peak / Q Capacity (%)"]
+            issues = []
+            if pd.isna(velocity):
+                issues.append("Velocity unavailable")
+            elif velocity <= 0.60:
+                issues.append("Velocity low (<=0.60)")
+            elif velocity <= 0.75:
+                issues.append("Velocity caution (>0.60 to 0.75)")
+            elif velocity >= 3.00:
+                issues.append("Velocity high (>=3.00)")
+            if pd.isna(ratio):
+                issues.append("Q ratio unavailable")
+            elif ratio >= 80:
+                issues.append("Q ratio >=80%")
+            check = "; ".join(issues) if issues else "Within designated ranges"
+            schedule_rows.append([
+                html_escape(row["Pipe_ID"]), html_escape(row["Location"]),
+                fmt_html(row["Pipe_Diameter_mm"]), fmt_html(row["Capacity (L/s)"], 2),
+                fmt_html(velocity, 2),
+                (fmt_html(ratio, 2) + "%") if pd.notna(ratio) else "-",
+                html_escape(check)
             ])
 
-            story.append(Paragraph("Design Parameters and Project Totals", styles["Heading1"]))
-            parameter_rows = [
-                ["Parameter", "Value"],
-                ["Average Daily Per Capita Flow (L/cap/day)", fmt(q)],
-                ["Extraneous Flow Rate (L/ha/s)", fmt(i)],
-                ["Commercial Domestic Sewage (L/d-m2)", fmt(commercial_domestic_sewage)],
-                ["Commercial / ICI Peaking Factor", fmt(ici_peak)],
-                ["Manning n", fmt(n)],
-                ["Velocity review criteria", "Flag <= 0.60 m/s; caution > 0.60 to 0.75 m/s; flag >= 3.00 m/s"],
-                ["Q Peak / Q Capacity review criterion", "Flag >= 80%"],
-            ]
-            parameter_table = Table(parameter_rows, colWidths=[95*mm, 165*mm], repeatRows=1)
-            parameter_table.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#14532D")),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                ("GRID", (0,0), (-1,-1), 0.35, colors.grey),
-                ("FONTSIZE", (0,0), (-1,-1), 8),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F2F6F3")]),
-                ("LEFTPADDING", (0,0), (-1,-1), 6),
-                ("RIGHTPADDING", (0,0), (-1,-1), 6),
-            ]))
-            story.extend([parameter_table, Spacer(1, 6*mm)])
+        def html_table(headers, rows):
+            head = "".join(f"<th>{html_escape(h)}</th>" for h in headers)
+            body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
+            return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
-            total_rows = [
-                ["Project total", "Value"],
-                ["Total population used (persons)", f"{total_population:,}"],
-                ["Total residential area (ha)", fmt(df["Residential_Area_ha"].sum())],
-                ["Total industrial/commercial area (ha)", fmt(df["Industrial_Area_ha"].sum())],
-                ["Total length of new pipes (m)", fmt(total_new_pipe_length)],
-            ]
-            total_table = Table(total_rows, colWidths=[95*mm, 165*mm], repeatRows=1)
-            total_table.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#14532D")),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                ("GRID", (0,0), (-1,-1), 0.35, colors.grey),
-                ("FONTSIZE", (0,0), (-1,-1), 8),
-                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F2F6F3")]),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-            ]))
-            story.extend([total_table, Spacer(1, 6*mm)])
+        if not schedule_rows:
+            schedule_html = "<p>No pipes are identified as New, New Pipe, or Proposed.</p>"
+        else:
+            schedule_html = html_table(schedule_headers, schedule_rows)
 
-            new_pipes = results[
-                results["Pipe_Type"].fillna("").astype(str).str.strip().str.lower()
-                .isin({"new", "new pipe", "proposed"})
-            ].copy()
-            story.append(Paragraph("New Pipe Schedule and Design Checks", styles["Heading1"]))
-            if new_pipes.empty:
-                story.append(Paragraph("No pipes are identified as New, New Pipe, or Proposed.", styles["ReportBody"]))
-            else:
-                schedule_cols = [
-                    ("Pipe ID", "Pipe_ID"), ("Location", "Location"),
-                    ("Diameter (mm)", "Pipe_Diameter_mm"),
-                    ("Capacity (L/s)", "Capacity (L/s)"),
-                    ("Velocity (m/s)", "Full Flow Velocity (m/s)"),
-                    ("Q Peak / Q Capacity (%)", "Q Peak / Q Capacity (%)")
-                ]
-                schedule_data = [[label for label, _ in schedule_cols] + ["Design check"]]
-                for _, row in new_pipes.iterrows():
-                    velocity = row["Full Flow Velocity (m/s)"]
-                    ratio = row["Q Peak / Q Capacity (%)"]
-                    issues = []
-                    if pd.isna(velocity):
-                        issues.append("Velocity unavailable")
-                    elif velocity <= 0.60:
-                        issues.append("Velocity low (<=0.60)")
-                    elif velocity <= 0.75:
-                        issues.append("Velocity caution (>0.60 to 0.75)")
-                    elif velocity >= 3.00:
-                        issues.append("Velocity high (>=3.00)")
-                    if pd.isna(ratio):
-                        issues.append("Q ratio unavailable")
-                    elif ratio >= 80:
-                        issues.append("Q ratio >=80%")
-                    check = "; ".join(issues) if issues else "Within designated ranges"
-                    values = []
-                    for _, col in schedule_cols:
-                        value = row[col]
-                        if col == "Pipe_Diameter_mm":
-                            values.append(fmt(value))
-                        elif col == "Q Peak / Q Capacity (%)":
-                            values.append(fmt(value) + "%" if pd.notna(value) else "-")
-                        elif col in {"Capacity (L/s)", "Full Flow Velocity (m/s)"}:
-                            values.append(fmt(value))
-                        else:
-                            values.append(safe(value))
-                    schedule_data.append(values + [check])
+        html_report = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sanitary Sewer Design Report</title>
+<style>
+:root {{ color-scheme: light; }}
+body {{ font-family: Arial, Helvetica, sans-serif; color: #1f2937; margin: 0; background: #f3f4f6; }}
+main {{ max-width: 1100px; margin: 28px auto; padding: 36px; background: white; box-shadow: 0 2px 12px #0001; }}
+h1 {{ color: #14532d; margin-bottom: 6px; }} h2 {{ color: #166534; border-bottom: 2px solid #dcfce7; padding-bottom: 6px; margin-top: 30px; }}
+.subtitle {{ color: #6b7280; margin-top: 0; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 13px; }}
+th, td {{ border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; }}
+th {{ background: #14532d; color: white; }}
+tr:nth-child(even) {{ background: #f9fafb; }}
+.note {{ background: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px 16px; }}
+@media print {{ body {{ background: white; }} main {{ margin: 0; padding: 12px; box-shadow: none; max-width: none; }} table {{ page-break-inside: auto; }} tr {{ page-break-inside: avoid; }} }}
+</style>
+</head>
+<body><main>
+<h1>Sanitary Sewer Design Report</h1>
+<p class="subtitle">Preliminary sanitary sewer network calculations</p>
+<h2>About this application</h2>
+<p>This tool supports preliminary sanitary sewer network calculations. It reads pipe, manhole, population, area, and pipe geometry data from a CSV file, then calculates cumulative upstream contributions, estimated sewage flows, and hydraulic performance for each pipe.</p>
+<p>The app orders connected pipes upstream-to-downstream; accumulates residential population, residential area, and industrial/commercial area through connected branches; calculates peak population, ICI and extraneous flows; and evaluates Manning-based full-flow capacity, velocity, and peak-flow-to-capacity ratio. Editable input tables allow selected values to be changed in the app, with calculations refreshed from the current values.</p>
+<h2>Diameter relationship</h2>
+<p>Hydraulic calculations use <code>D_calc = D_input / 25 * 25.4</code>. The entered diameter is retained as the input value.</p>
+<h2>Design reference and limitations</h2>
+<p>This workflow and selected calculation methods are informed by the Ontario Ministry of the Environment’s Design Guidelines for Sewage Works. This tool is a calculation aid; it does not implement every guideline requirement or certify design compliance. Confirm current provincial and municipal criteria, project conditions, assumptions, and results through appropriate engineering review. Reference: <a href="https://www.ontario.ca/document/design-guidelines-sewage-works-0">Ontario Design Guidelines for Sewage Works</a>.</p>
+<h2>Design Parameters</h2>
+{html_table(["Parameter", "Value"], parameter_rows)}
+<h2>Project Totals</h2>
+{html_table(["Project total", "Value"], total_rows)}
+<h2>New Pipe Schedule and Design Checks</h2>
+{schedule_html}
+<p class="note">Review criteria: velocity <= 0.60 m/s or >= 3.00 m/s is flagged; velocity > 0.60 and <= 0.75 m/s is a caution range. The designated velocity range without these flags is > 0.75 and < 3.00 m/s. Q Peak / Q Capacity >= 80% is flagged. A pipe is reported as within designated ranges only when both checks are available and neither criterion is triggered.</p>
+</main></body></html>'''
 
-                schedule_table = Table(
-                    [[Paragraph(safe(cell), styles["SmallCell"]) for cell in row]
-                     for row in schedule_data],
-                    colWidths=[24*mm, 42*mm, 24*mm, 27*mm, 25*mm, 35*mm, 70*mm],
-                    repeatRows=1, hAlign="LEFT"
-                )
-                schedule_table.setStyle(TableStyle([
-                    ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#14532D")),
-                    ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                    ("GRID", (0,0), (-1,-1), 0.35, colors.grey),
-                    ("FONTSIZE", (0,0), (-1,-1), 7),
-                    ("VALIGN", (0,0), (-1,-1), "TOP"),
-                    ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F2F6F3")]),
-                    ("LEFTPADDING", (0,0), (-1,-1), 4),
-                    ("RIGHTPADDING", (0,0), (-1,-1), 4),
-                ]))
-                story.append(schedule_table)
-
-            story.extend([
-                Spacer(1, 5*mm),
-                Paragraph(
-                    "Review criteria: velocity <= 0.60 m/s or >= 3.00 m/s is flagged; "
-                    "velocity > 0.60 and <= 0.75 m/s is a caution range. The designated "
-                    "velocity range without these flags is > 0.75 and < 3.00 m/s. "
-                    "Q Peak / Q Capacity >= 80% is flagged. A pipe is reported as within "
-                    "designated ranges only when both checks are available and neither "
-                    "criterion is triggered.", styles["ReportBody"])
-            ])
-
-            doc.build(story)
-            buffer.seek(0)
-            return buffer.getvalue()
-
-        pdf_data = build_pdf_report()
         st.download_button(
-            label="Download PDF Design Report",
-            data=pdf_data,
-            file_name="sanitary_sewer_design_report.pdf",
-            mime="application/pdf"
+            label="Download HTML Design Report",
+            data=html_report.encode("utf-8"),
+            file_name="sanitary_sewer_design_report.html",
+            mime="text/html",
+            help="Downloads a self-contained web report that opens in a browser; no PDF or Word package is needed."
         )
 
     except Exception as e:
