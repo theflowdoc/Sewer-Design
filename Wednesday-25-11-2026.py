@@ -519,9 +519,11 @@ if uploaded_file is not None:
             .fillna(0)
             .clip(lower=0)
         )
-        df["Residential Population"] = np.floor(
-            df["Population_per_ha"] * df["Residential_Area_ha"] + 0.5
-        ).astype(int)
+        # Keep full precision for all population calculations. Whole-number
+        # rounding is applied only in table display and project totals.
+        df["Residential Population"] = (
+            df["Population_per_ha"] * df["Residential_Area_ha"]
+        )
 
         def calculate_network_cumulative(data):
             """Accumulate population and total area through the sewer network.
@@ -561,7 +563,7 @@ if uploaded_file is not None:
                     downstream_children[parent_index].append(child_index)
 
             cumulative_population = (
-                data["Residential Population"].astype(int).tolist()
+                data["Residential Population"].astype(float).tolist()
             )
             local_total_area = (
                 data["Residential_Area_ha"] + data["Industrial_Area_ha"]
@@ -1088,22 +1090,29 @@ if uploaded_file is not None:
 
         st.subheader("Project Totals")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
 
-        col1.metric(
-            "Total Population",
-            int(df["Residential Population"].sum())
-        )
+        # Round the summed full-precision population only for presentation;
+        # do not truncate it or round individual pipe contributions first.
+        total_population = int(np.floor(df["Residential Population"].sum() + 0.5))
+        col1.metric("Total Population", f"{total_population:,}")
 
         col2.metric(
             "Residential Area (ha)",
-            round(df["Residential_Area_ha"].sum(), 2)
+            f"{df['Residential_Area_ha'].sum():,.2f}"
         )
 
         col3.metric(
             "Industrial Area (ha)",
-            round(df["Industrial_Area_ha"].sum(), 2)
+            f"{df['Industrial_Area_ha'].sum():,.2f}"
         )
+
+        pipe_type_normalized = df["Pipe_Type"].fillna("").astype(str).str.strip().str.lower()
+        new_pipe_mask = pipe_type_normalized.isin({"new", "new pipe", "proposed"})
+        total_new_pipe_length = pd.to_numeric(
+            df.loc[new_pipe_mask, "Length_m"], errors="coerce"
+        ).fillna(0).sum()
+        col4.metric("Total Length of New Pipes (m)", f"{total_new_pipe_length:,.2f}")
 
         # =====================================================
         # DOWNLOAD RESULTS
