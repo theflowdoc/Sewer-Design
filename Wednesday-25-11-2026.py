@@ -361,40 +361,67 @@ if uploaded_file is not None:
         # =====================================================
 
         def network_row_order(data):
-            """Return a stable topological row order, keeping tributaries together."""
+            """Order pipes upstream-to-downstream, keeping branches together.
+
+            At a junction, a downstream pipe is placed only after all pipes
+            entering that manhole have been ordered. Branches starting at the
+            same manhole retain their input order.
+            """
             def node_key(value):
                 if pd.isna(value):
                     return None
                 value = str(value).strip()
                 return value or None
 
+            row_count = len(data)
             starts = [node_key(v) for v in data["From_MH_ID"]]
             ends = [node_key(v) for v in data["To_MH_ID"]]
+
             incoming = {}
-            children = [[] for _ in range(len(data))]
-            indegree = [0] * len(data)
-            for idx, end in enumerate(ends):
-                if end is not None:
-                    incoming.setdefault(end, []).append(idx)
-            for idx, start in enumerate(starts):
-                parents = [j for j in incoming.get(start, []) if j != idx] if start else []
-                indegree[idx] = len(parents)
-                for parent in parents:
-                    children[parent].append(idx)
-            ready = [idx for idx, degree in enumerate(indegree) if degree == 0]
-            order = []
-            pos = 0
-            while pos < len(ready):
-                current = ready[pos]
-                pos += 1
-                order.append(current)
-                for child in children[current]:
-                    indegree[child] -= 1
-                    if indegree[child] == 0:
-                        ready.append(child)
-            # Cycles are reported by the existing cumulative-calculation check.
-            order.extend(idx for idx in range(len(data)) if idx not in set(order))
-            return order
+            outgoing = {}
+            for idx, node in enumerate(ends):
+                if node is not None:
+                    incoming.setdefault(node, []).append(idx)
+            for idx, node in enumerate(starts):
+                if node is not None:
+                    outgoing.setdefault(node, []).append(idx)
+
+            ordered = []
+            ordered_set = set()
+            visiting = set()
+
+            def visit_pipe(pipe_idx):
+                if pipe_idx in ordered_set or pipe_idx in visiting:
+                    return
+
+                visiting.add(pipe_idx)
+                ordered.append(pipe_idx)
+                ordered_set.add(pipe_idx)
+
+                downstream_node = ends[pipe_idx]
+                if downstream_node is not None:
+                    for next_pipe in outgoing.get(downstream_node, []):
+                        upstream_pipes = incoming.get(downstream_node, [])
+                        if all(parent in ordered_set for parent in upstream_pipes):
+                            visit_pipe(next_pipe)
+
+                visiting.remove(pipe_idx)
+
+            # Start from pipes whose From manhole has no incoming pipe.
+            source_pipes = [
+                idx for idx in range(row_count)
+                if starts[idx] is not None and not incoming.get(starts[idx], [])
+            ]
+            for pipe_idx in source_pipes:
+                visit_pipe(pipe_idx)
+
+            # Include disconnected components. Cycles are reported by the
+            # cumulative-calculation validation below.
+            for pipe_idx in range(row_count):
+                if pipe_idx not in ordered_set:
+                    visit_pipe(pipe_idx)
+
+            return ordered
 
         # =====================================================
         # PERSIST INPUTS FROM THE UPLOADED CSV AND APP EDITORS
