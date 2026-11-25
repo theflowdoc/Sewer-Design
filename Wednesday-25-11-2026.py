@@ -46,8 +46,9 @@ hydraulic performance for each pipe.
   population flow, peak ICI flow based on cumulative industrial/commercial
   area, extraneous flow, and total peak design flow using the design parameters
   provided in the sidebar.
-- **Pipe hydraulic calculations:** Calculates pipe slope, Manning-based full-flow
-  capacity, full-flow velocity, and peak-flow-to-capacity ratio.
+- **Pipe hydraulic calculations:** Applies D_calc = D_input / 25 * 25.4 to
+  the entered diameter for hydraulic calculations, then calculates pipe slope,
+  Manning-based full-flow capacity, full-flow velocity, and peak-flow-to-capacity ratio.
 - **Interactive input tables:** Allows population density, residential area,
   industrial area, pipe length, pipe diameter, and invert elevations to be edited
   in the app, with dependent calculations refreshed from the edited values.
@@ -671,7 +672,13 @@ if uploaded_file is not None:
                  / data["Length_m"]) * 100,
                 0.0
             )
-            data["Diameter_m"] = data["Pipe_Diameter_mm"] / 1000
+            # Apply the requested diameter relationship consistently in all
+            # hydraulic calculations: D_calc = D_input / 25 * 25.4.
+            # Keep Pipe_Diameter_mm as the original editable input.
+            data["Calculated Diameter (mm)"] = (
+                data["Pipe_Diameter_mm"] / 25.0 * 25.4
+            )
+            data["Diameter_m"] = data["Calculated Diameter (mm)"] / 1000
             data["Area_m2"] = np.pi * data["Diameter_m"] ** 2 / 4
             data["Hydraulic_Radius_m"] = data["Diameter_m"] / 4
             effective_slope = data["Slope (%)"].clip(lower=0) / 100
@@ -971,7 +978,8 @@ if uploaded_file is not None:
 
         st.subheader("Sewer Data")
         st.caption(
-            "Edit Length, Pipe Size, and invert elevations. "
+            "Edit Length, Pipe Size, and invert elevations. The entered Pipe Size "
+            "is retained; hydraulic calculations use D_calc = D_input / 25 * 25.4. "
             "Hydraulic results and the Results table recalculate automatically."
         )
 
@@ -986,6 +994,7 @@ if uploaded_file is not None:
             "Downstream_Invert_m",
             "Pipe_Type",
             "Slope (%)",
+            "Calculated Diameter (mm)",
             "Capacity (L/s)",
             "Full Flow Velocity (m/s)",
             "Q Peak / Q Capacity (%)"
@@ -1026,6 +1035,9 @@ if uploaded_file is not None:
                 "Downstream_Invert_m": st.column_config.NumberColumn("Downstream Invert (m)", step=0.001, format="%.3f"),
                 "Pipe_Type": st.column_config.TextColumn("Type of Pipe"),
                 "Slope (%)": st.column_config.NumberColumn("Slope (%)", format="%.2f"),
+                "Calculated Diameter (mm)": st.column_config.NumberColumn(
+                    "Calculated Diameter (mm)", format="%.2f"
+                ),
                 "Capacity (L/s)": st.column_config.NumberColumn("Capacity (L/s), n=0.013", format="%.2f"),
                 "Full Flow Velocity (m/s)": st.column_config.NumberColumn("Full Flow Velocity (m/s)", format="%.2f"),
                 "Q Peak / Q Capacity (%)": st.column_config.NumberColumn("Q Peak / Q Capacity", format="%.2f%%")
@@ -1066,6 +1078,7 @@ if uploaded_file is not None:
             "Downstream_Invert_m",
             "Pipe_Type",
             "Slope (%)",
+            "Calculated Diameter (mm)",
             "Capacity (L/s)",
             "Full Flow Velocity (m/s)",
             "Q Peak / Q Capacity (%)"
