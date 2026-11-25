@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import hashlib
 from io import BytesIO
+pip install "python-docx>=1.1"
 
 # =====================================================
 # PAGE SETUP
