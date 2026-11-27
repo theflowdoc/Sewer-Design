@@ -1,0 +1,1329 @@
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import hashlib
+from io import BytesIO
+
+# =====================================================
+# PAGE SETUP
+# =====================================================
+
+st.set_page_config(
+    page_title="Sanitary Sewer Design",
+    layout="wide"
+)
+
+st.title("Sanitary Sewer Design Tool")
+
+# =====================================================
+# APPLICATION OVERVIEW AND DESIGN REFERENCE
+# =====================================================
+
+st.markdown("""
+### About this application
+
+This tool supports **preliminary sanitary sewer network calculations**. It reads
+pipe, manhole, population, area, and pipe geometry data from a CSV file, then
+calculates cumulative upstream contributions, estimated sewage flows, and
+hydraulic performance for each pipe.
+
+**Main capabilities**
+
+- **CSV input template:** Download a standardized template, enter the initial
+  project data, and upload the completed file.
+- **Network diagram:** Draws connected manholes as labeled nodes and directed
+  pipes with Pipe ID and Location on separate lines. New/proposed pipes are shown
+  in dark green. All tables follow the same upstream-to-downstream network order.
+- **Branched network accumulation:** Uses the upstream (`From`) and downstream
+  (`To`) manhole IDs to combine residential population, total area, and
+  industrial/commercial area from connected upstream pipes at shared manholes,
+  independent of CSV row order. Industrial/commercial cumulative area is
+  calculated separately so it can be used in the ICI peak-flow calculation.
+- **Population calculations:** Calculates local residential population from
+  population density and residential area, rounds population counts to the
+  nearest whole person, and totals cumulative upstream population.
+- **Sewage flow calculations:** Calculates the Harmon peaking factor, peak
+  population flow, peak ICI flow based on cumulative industrial/commercial
+  area, extraneous flow, and total peak design flow using the design parameters
+  provided in the sidebar.
+- **Pipe hydraulic calculations:** Applies D_calc = D_input / 25 * 25.4 to
+  the entered diameter for hydraulic calculations, then calculates pipe slope,
+  Manning-based full-flow capacity, full-flow velocity, and peak-flow-to-capacity ratio.
+- **Interactive input tables:** Allows population density, residential area,
+  industrial area, pipe length, pipe diameter, and invert elevations to be edited
+  in the app, with dependent calculations refreshed from the edited values.
+- **Results and review:** Presents separate Population, Flows, and Sewer Data
+  tables, a combined Results table, project totals, and a downloadable results CSV.
+- **Visual checks:** Highlights velocities at or below 0.60 m/s or at or above
+  3.00 m/s in red, velocities above 0.60 through 0.75 m/s in orange, and
+  peak-flow/capacity ratios of 80% or greater in red.
+
+**Design reference:** The app's workflow and selected calculation methods are
+informed by the Ontario Ministry of the Environment's *Design Guidelines for
+Sewage Works* (MOE). Read the [official Ontario guidelines](https://www.ontario.ca/document/design-guidelines-sewage-works-0).
+
+**Important:** This app is a calculation aid; it does not implement every
+requirement in the guidelines or independently certify design compliance.
+Confirm the applicable current provincial and municipal criteria, project-specific
+conditions, assumptions, and results through appropriate engineering review.
+""")
+
+# =====================================================
+# START HERE: DOWNLOAD THE INPUT TEMPLATE
+# =====================================================
+
+st.info(
+    "**Start here:** Download the CSV template below, fill in your initial "
+    "sewer and population information, save it as a CSV file, and then upload "
+    "it to begin the calculations. Keep the column headers exactly as provided. "
+    "The app uses these predefined headers to identify each field."
+)
+
+# Keep these headers stable: the app's column-mapping logic uses them to
+# recognize the input fields. CSV files themselves cannot lock header cells,
+# so the instructions above ask users not to rename them.
+template_columns = [
+    "Location",
+    "Pipe ID",
+    "From",
+    "To",
+    "Subcatchment Area ID",
+    "Population per ha",
+    "Residential Area (ha)",
+    "Industrial Area (ha)",
+    "Length (m)",
+    "Pipe Diameter (mm)",
+    "Upstream Invert (m)",
+    "Downstream Invert (m)",
+    "Type of Pipe",
+]
+
+# Include a few blank rows so users can start entering records immediately.
+template_df = pd.DataFrame(
+    [{column: "" for column in template_columns} for _ in range(5)],
+    columns=template_columns,
+)
+template_csv = template_df.to_csv(index=False)
+
+st.download_button(
+    label="Download CSV Input Template",
+    data=template_csv,
+    file_name="sanitary_sewer_input_template.csv",
+    mime="text/csv",
+    help="Download this file, enter your initial data, and upload the completed CSV below.",
+)
+
+st.caption(
+    "Required input fields: Location, Pipe ID, From, To, Subcatchment Area ID, "
+    "Population per ha, and Residential Area (ha). Other fields can be filled "
+    "when applicable; missing optional numeric values default to zero."
+)
+
+# =====================================================
+# DESIGN PARAMETERS
+# =====================================================
+
+st.sidebar.header("Design Parameters")
+
+q = st.sidebar.number_input(
+    "Average Daily Per Capita Flow (L/cap/day)",
+    value=350.0
+)
+
+i = st.sidebar.number_input(
+    "Extraneous Flow Rate (L/ha/s)",
+    value=0.28
+)
+
+commercial_domestic_sewage = st.sidebar.number_input(
+    "Commercial Domestic Sewage (L/d-m²)",
+    value=5.0
+)
+
+ici_peak = st.sidebar.number_input(
+    "Commercial / ICI Peaking Factor",
+    value=2.0
+)
+
+n = st.sidebar.number_input(
+    "Manning n",
+    value=0.013,
+    min_value=0.001,
+    format="%.3f"
+)
+
+# =====================================================
+# FILE UPLOAD
+# =====================================================
+
+uploaded_file = st.file_uploader(
+    "Upload your completed CSV template to begin calculations",
+    type=["csv"],
+    help="Use the downloaded template and keep its column headers unchanged.",
+)
+
+# =====================================================
+# HARMON FACTOR
+# =====================================================
+
+def harmon_factor(population):
+    P = population / 1000
+
+    M = 1 + (14 / (4 + np.sqrt(P)))
+
+    M = np.minimum(M, 4)
+    M = np.maximum(M, 2)
+
+    return M
+
+
+# =====================================================
+# PROCESS FILE
+# =====================================================
+
+if uploaded_file is not None:
+
+    try:
+        df = pd.read_csv(uploaded_file)
+
+        # =====================================================
+        # CLEAN COLUMN NAMES
+        # =====================================================
+
+        df.columns = df.columns.str.strip()
+
+        # =====================================================
+        # AUTO COLUMN MAPPING
+        # =====================================================
+
+        rename_map = {}
+
+        for col in df.columns:
+            c = col.lower().strip()
+
+            if c in ["street", "location"]:
+                rename_map[col] = "Location"
+
+            elif c in ["pipe id", "pipe_id"]:
+                rename_map[col] = "Pipe_ID"
+
+            elif c == "from":
+                rename_map[col] = "From_MH_ID"
+
+            elif c == "to":
+                rename_map[col] = "To_MH_ID"
+
+            elif "subc" in c:
+                rename_map[col] = "Subcatchment_ID"
+
+            elif (
+                c in ["pop", "population per ha", "population/ha", "population per hectare", "pop/ha"]
+                or (("pop" in c or "population" in c) and ("/ha" in c or "per ha" in c or "hectare" in c))
+            ):
+                rename_map[col] = "Population_per_ha"
+
+            elif "industrial" in c:
+                rename_map[col] = "Industrial_Area_ha"
+
+            elif c in ["area", "area (ha)", "residential area", "residential area (ha)"] or (
+                "residential" in c and "area" in c
+            ):
+                rename_map[col] = "Residential_Area_ha"
+
+            elif "length" in c:
+                rename_map[col] = "Length_m"
+
+            elif "diameter" in c or c in ["pipe size", "pipe size (mm)", "diameter (mm)"]:
+                rename_map[col] = "Pipe_Diameter_mm"
+
+            elif "upstream invert" in c:
+                rename_map[col] = "Upstream_Invert_m"
+
+            elif "downstream invert" in c:
+                rename_map[col] = "Downstream_Invert_m"
+
+            elif "type of pipe" in c:
+                rename_map[col] = "Pipe_Type"
+
+        df.rename(columns=rename_map, inplace=True)
+
+        # =====================================================
+        # CLEAN EMPTY RECORDS
+        # =====================================================
+
+        df = df.replace(r"^\s*$", np.nan, regex=True)
+
+        df = df.replace(
+            ["None", "none", "NULL", "null", "nan"],
+            np.nan
+        )
+
+        text_cols = [
+            "Location",
+            "Pipe_ID",
+            "From_MH_ID",
+            "To_MH_ID",
+            "Subcatchment_ID"
+        ]
+
+        for col in text_cols:
+            if col in df.columns:
+                df[col] = (
+                    df[col]
+                    .astype("string")
+                    .str.strip()
+                )
+
+                df[col] = df[col].replace(
+                    ["", "None", "none", "nan", "NULL", "null"],
+                    np.nan
+                )
+
+        existing_cols = [
+            col for col in text_cols
+            if col in df.columns
+        ]
+
+        if existing_cols:
+            df = df.dropna(
+                subset=existing_cols,
+                how="all"
+            )
+
+        if "Pipe_ID" in df.columns:
+            df = df[df["Pipe_ID"].notna()]
+
+        df = df.reset_index(drop=True)
+
+        # =====================================================
+        # OPTIONAL COLUMNS
+        # =====================================================
+
+        optional_defaults = {
+            "Industrial_Area_ha": 0.0,
+            "Length_m": 0.0,
+            "Pipe_Diameter_mm": 0.0,
+            "Upstream_Invert_m": 0.0,
+            "Downstream_Invert_m": 0.0,
+            "Pipe_Type": ""
+        }
+
+        for col, default in optional_defaults.items():
+            if col not in df.columns:
+                df[col] = default
+
+        # =====================================================
+        # REQUIRED COLUMNS
+        # =====================================================
+
+        required_columns = [
+            "Location",
+            "Pipe_ID",
+            "From_MH_ID",
+            "To_MH_ID",
+            "Subcatchment_ID",
+            "Population_per_ha",
+            "Residential_Area_ha"
+        ]
+
+        missing = [
+            col for col in required_columns
+            if col not in df.columns
+        ]
+
+        if missing:
+            st.error(f"Missing columns: {missing}")
+            st.write("Columns found:")
+            st.write(df.columns.tolist())
+            st.stop()
+
+        # =====================================================
+        # NUMERIC CONVERSION
+        # =====================================================
+
+        numeric_cols = [
+            "Population_per_ha",
+            "Residential_Area_ha",
+            "Industrial_Area_ha",
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m"
+        ]
+
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            ).fillna(0)
+
+        # =====================================================
+        # NETWORK-ORDER HELPER (UPSTREAM TO DOWNSTREAM)
+        # =====================================================
+
+        def network_row_order(data):
+            """Order pipes upstream-to-downstream, keeping branches together.
+
+            At a junction, a downstream pipe is placed only after all pipes
+            entering that manhole have been ordered. Branches starting at the
+            same manhole retain their input order.
+            """
+            def node_key(value):
+                if pd.isna(value):
+                    return None
+                value = str(value).strip()
+                return value or None
+
+            row_count = len(data)
+            starts = [node_key(v) for v in data["From_MH_ID"]]
+            ends = [node_key(v) for v in data["To_MH_ID"]]
+
+            incoming = {}
+            outgoing = {}
+            for idx, node in enumerate(ends):
+                if node is not None:
+                    incoming.setdefault(node, []).append(idx)
+            for idx, node in enumerate(starts):
+                if node is not None:
+                    outgoing.setdefault(node, []).append(idx)
+
+            ordered = []
+            ordered_set = set()
+            visiting = set()
+
+            def visit_pipe(pipe_idx):
+                if pipe_idx in ordered_set or pipe_idx in visiting:
+                    return
+
+                visiting.add(pipe_idx)
+                ordered.append(pipe_idx)
+                ordered_set.add(pipe_idx)
+
+                downstream_node = ends[pipe_idx]
+                if downstream_node is not None:
+                    for next_pipe in outgoing.get(downstream_node, []):
+                        upstream_pipes = incoming.get(downstream_node, [])
+                        if all(parent in ordered_set for parent in upstream_pipes):
+                            visit_pipe(next_pipe)
+
+                visiting.remove(pipe_idx)
+
+            # Start from pipes whose From manhole has no incoming pipe.
+            source_pipes = [
+                idx for idx in range(row_count)
+                if starts[idx] is not None and not incoming.get(starts[idx], [])
+            ]
+            for pipe_idx in source_pipes:
+                visit_pipe(pipe_idx)
+
+            # Include disconnected components. Cycles are reported by the
+            # cumulative-calculation validation below.
+            for pipe_idx in range(row_count):
+                if pipe_idx not in ordered_set:
+                    visit_pipe(pipe_idx)
+
+            return ordered
+
+        # =====================================================
+        # PERSIST INPUTS FROM THE UPLOADED CSV AND APP EDITORS
+        # =====================================================
+
+        population_editable_columns = [
+            "Population_per_ha",
+            "Residential_Area_ha",
+            "Industrial_Area_ha"
+        ]
+        editable_columns = [
+            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m", "Downstream_Invert_m"
+        ]
+
+        # Keep a canonical working copy so edits made in the app are not replaced
+        # by the original CSV on the next Streamlit rerun. A new CSV resets it.
+        upload_signature = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+        if st.session_state.get("upload_signature") != upload_signature:
+            st.session_state["upload_signature"] = upload_signature
+            st.session_state["design_inputs_df"] = df.copy(deep=True)
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
+        elif "design_inputs_df" not in st.session_state:
+            st.session_state["design_inputs_df"] = df.copy(deep=True)
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
+
+        # The working copy contains the most recently edited values, not values
+        # re-read from the CSV. All calculations below use this working copy.
+        # Arrange every table in the same upstream-to-downstream network order.
+        df = st.session_state["design_inputs_df"].copy(deep=True)
+        ordered_df = df.iloc[network_row_order(df)].reset_index(drop=True)
+        if not ordered_df.index.equals(df.index) or not ordered_df.equals(df):
+            st.session_state["design_inputs_df"] = ordered_df.copy(deep=True)
+            st.session_state["editor_generation"] = st.session_state.get("editor_generation", 0) + 1
+        df = ordered_df
+
+        def save_editor_changes(editor_key, columns):
+            """Merge widget edits into the persistent input dataframe."""
+            editor_state = st.session_state.get(editor_key, {})
+            edited_rows = (
+                editor_state.get("edited_rows", {})
+                if isinstance(editor_state, dict) else {}
+            )
+            working = st.session_state.get("design_inputs_df")
+            if working is None:
+                return
+
+            working = working.copy(deep=True)
+            for row_index, changes in edited_rows.items():
+                try:
+                    row_index = int(row_index)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= row_index < len(working):
+                    for col in columns:
+                        if col in changes:
+                            value = pd.to_numeric(
+                                pd.Series([changes[col]]), errors="coerce"
+                            ).iloc[0]
+                            working.at[row_index, col] = 0.0 if pd.isna(value) else value
+
+            st.session_state["design_inputs_df"] = working
+            # Re-key both editors after a change. This clears stale widget deltas
+            # while preserving all current values in design_inputs_df.
+            st.session_state["editor_generation"] = (
+                st.session_state.get("editor_generation", 0) + 1
+            )
+
+        # =====================================================
+        # POPULATION AND TOTAL-AREA CALCULATIONS BY CONNECTED SEWER NETWORK
+        # =====================================================
+
+        # Each row's residential and industrial areas are local contributions.
+        # Total Area is accumulated through the directed From -> To network.
+        # This combines all upstream branches at shared manholes, independent
+        # of CSV row order.
+        #
+        # Population density remains an input rate. Calculated population counts
+        # are rounded to the nearest whole person before flow calculations.
+        df["Population_per_ha"] = (
+            pd.to_numeric(df["Population_per_ha"], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+        )
+        df["Residential_Area_ha"] = (
+            pd.to_numeric(df["Residential_Area_ha"], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+        )
+        df["Industrial_Area_ha"] = (
+            pd.to_numeric(df["Industrial_Area_ha"], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+        )
+        # Keep full precision for all population calculations. Whole-number
+        # rounding is applied only in table display and project totals.
+        df["Residential Population"] = (
+            df["Population_per_ha"] * df["Residential_Area_ha"]
+        )
+
+        def calculate_network_cumulative(data):
+            """Accumulate population and total area through the sewer network.
+
+            A topological pass ensures that tributary branches are combined
+            before their downstream pipes are processed.
+            """
+            data = data.copy()
+            row_count = len(data)
+
+            def clean_node(value):
+                if pd.isna(value):
+                    return None
+                value = str(value).strip()
+                return value if value else None
+
+            from_nodes = [clean_node(value) for value in data["From_MH_ID"]]
+            to_nodes = [clean_node(value) for value in data["To_MH_ID"]]
+
+            incoming_pipes = {}
+            for pipe_index, to_node in enumerate(to_nodes):
+                if to_node is not None:
+                    incoming_pipes.setdefault(to_node, []).append(pipe_index)
+
+            downstream_children = [[] for _ in range(row_count)]
+            pending_parent_count = [0] * row_count
+
+            for child_index, from_node in enumerate(from_nodes):
+                upstream_indices = (
+                    incoming_pipes.get(from_node, []) if from_node is not None else []
+                )
+                upstream_indices = [
+                    idx for idx in upstream_indices if idx != child_index
+                ]
+                pending_parent_count[child_index] = len(upstream_indices)
+                for parent_index in upstream_indices:
+                    downstream_children[parent_index].append(child_index)
+
+            cumulative_population = (
+                data["Residential Population"].astype(float).tolist()
+            )
+            local_total_area = (
+                data["Residential_Area_ha"] + data["Industrial_Area_ha"]
+            )
+            cumulative_total_area = local_total_area.astype(float).tolist()
+
+            # ICI area includes only the local industrial/commercial contribution.
+            # It is accumulated separately from residential area and total area.
+            local_ici_area = data["Industrial_Area_ha"].astype(float)
+            cumulative_ici_area = local_ici_area.tolist()
+
+            queue = [
+                idx for idx, count in enumerate(pending_parent_count)
+                if count == 0
+            ]
+            processed_count = 0
+            queue_position = 0
+
+            while queue_position < len(queue):
+                parent_index = queue[queue_position]
+                queue_position += 1
+                processed_count += 1
+
+                for child_index in downstream_children[parent_index]:
+                    cumulative_population[child_index] += cumulative_population[parent_index]
+                    cumulative_total_area[child_index] += cumulative_total_area[parent_index]
+                    cumulative_ici_area[child_index] += cumulative_ici_area[parent_index]
+                    pending_parent_count[child_index] -= 1
+                    if pending_parent_count[child_index] == 0:
+                        queue.append(child_index)
+
+            if processed_count != row_count:
+                cycle_indices = [
+                    idx for idx, count in enumerate(pending_parent_count)
+                    if count > 0
+                ]
+                cycle_pipe_ids = (
+                    data.iloc[cycle_indices]["Pipe_ID"].astype(str).tolist()
+                )
+                raise ValueError(
+                    "A loop/cycle was detected in the pipe network. Check the From and "
+                    "To manhole IDs for these pipe records: "
+                    f"{', '.join(cycle_pipe_ids)}. A gravity sewer network should not "
+                    "contain directed cycles."
+                )
+
+            data["Population Cumulative"] = cumulative_population
+            data["Total Area (ha)"] = cumulative_total_area
+            data["Industrial / Commercial Cumulative Area (ha)"] = cumulative_ici_area
+            return data
+
+        df = calculate_network_cumulative(df)
+
+        # =====================================================
+        # FLOW CALCULATIONS
+        # =====================================================
+
+        df["Peaking Factor M"] = harmon_factor(
+            df["Population Cumulative"]
+        )
+
+        df["Peak Population Flow Q(p)"] = (
+            df["Population Cumulative"]
+            * q
+            * df["Peaking Factor M"]
+            / 86400
+        )
+
+        # ICI peak flow uses cumulative industrial/commercial area only.
+        # Units: (ha * 10,000 m²/ha * L/d-m² * peaking factor) / (24 * 3600 s/d)
+        df["Peak ICI Flow Q(p)"] = (
+            df["Industrial / Commercial Cumulative Area (ha)"]
+            * commercial_domestic_sewage
+            * 10000
+            * ici_peak
+            / 24
+            / 3600
+        )
+
+
+        # Extraneous flow is based on the local residential area plus the
+        # cumulative industrial/commercial area from this pipe and all upstream
+        # connected branches. Units: ha * (L/ha/s) = L/s.
+        df["Peak Extraneous Flow Q(i)"] = (
+            df["Residential_Area_ha"]
+            + df["Industrial / Commercial Cumulative Area (ha)"]
+        ) * i
+
+        df["Peak Design Flow Q(t)"] = (
+            df["Peak Population Flow Q(p)"]
+            + df["Peak ICI Flow Q(p)"]
+            + df["Peak Extraneous Flow Q(i)"]
+        )
+
+        # =====================================================
+        # HYDRAULIC CALCULATION HELPER
+        # =====================================================
+
+        def calculate_hydraulics(data, manning_n):
+            data = data.copy()
+
+            data["Slope (%)"] = np.where(
+                data["Length_m"] > 0,
+                ((data["Upstream_Invert_m"] - data["Downstream_Invert_m"])
+                 / data["Length_m"]) * 100,
+                0.0
+            )
+            # Apply the requested diameter relationship consistently in all
+            # hydraulic calculations: D_calc = D_input / 25 * 25.4.
+            # Keep Pipe_Diameter_mm as the original editable input.
+            data["Calculated Diameter (mm)"] = (
+                data["Pipe_Diameter_mm"] / 25.0 * 25.4
+            )
+            data["Diameter_m"] = data["Calculated Diameter (mm)"] / 1000
+            data["Area_m2"] = np.pi * data["Diameter_m"] ** 2 / 4
+            data["Hydraulic_Radius_m"] = data["Diameter_m"] / 4
+            effective_slope = data["Slope (%)"].clip(lower=0) / 100
+
+            data["Capacity_m3s"] = (
+                (1 / manning_n)
+                * data["Area_m2"]
+                * data["Hydraulic_Radius_m"] ** (2 / 3)
+                * np.sqrt(effective_slope)
+            )
+            data.loc[
+                (data["Diameter_m"] <= 0) | (data["Length_m"] <= 0),
+                "Capacity_m3s"
+            ] = 0.0
+
+            data["Capacity (L/s)"] = data["Capacity_m3s"] * 1000
+            data["Full Flow Velocity (m/s)"] = np.where(
+                data["Area_m2"] > 0,
+                data["Capacity_m3s"] / data["Area_m2"],
+                0.0
+            )
+            data["Q Peak / Q Capacity (%)"] = np.where(
+                data["Capacity (L/s)"] > 0,
+                data["Peak Design Flow Q(t)"] / data["Capacity (L/s)"] * 100,
+                np.nan
+            )
+            return data
+
+        # Recalculate using the current persistent editable values before rendering tables.
+        df = calculate_hydraulics(df, n)
+
+        id_columns = [
+            "Location", "Pipe_ID", "From_MH_ID", "To_MH_ID", "Subcatchment_ID"
+        ]
+
+        # =====================================================
+        # MANHOLE / PIPE NETWORK DIAGRAM
+        # =====================================================
+
+        st.subheader("Manhole and Pipe Network Diagram")
+        st.caption(
+            "Each oval represents a manhole. Arrows show the pipe direction "
+            "from the `From` manhole to the `To` manhole. Each arrow displays "
+            "the Pipe ID, with Location directly below it. Shared manhole IDs are drawn as one node, "
+            "so connected branches meet at the same location in the diagram."
+        )
+
+        def diagram_text(value, default=""):
+            if pd.isna(value):
+                return default
+            text_value = str(value).strip()
+            return text_value if text_value else default
+
+        def dot_quote(value):
+            """Escape a value as a Graphviz quoted string."""
+            return (
+                str(value)
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", "")
+                .replace("\n", "\\n")
+            )
+
+        # Build one graph node per unique manhole ID. Use generated DOT node
+        # identifiers so unusual manhole IDs cannot break the Graphviz source.
+        from_values = [diagram_text(value) for value in df["From_MH_ID"]]
+        to_values = [diagram_text(value) for value in df["To_MH_ID"]]
+        pipe_values = [diagram_text(value, default="(Pipe ID missing)") for value in df["Pipe_ID"]]
+        location_values = [diagram_text(value, default="(Location missing)") for value in df["Location"]]
+
+        manhole_labels = []
+        manhole_node_ids = {}
+        valid_edge_rows = []
+        missing_connection_rows = []
+
+        for row_index, (from_mh, to_mh, pipe_id, location) in enumerate(
+            zip(from_values, to_values, pipe_values, location_values)
+        ):
+            if not from_mh or not to_mh:
+                missing_connection_rows.append({
+                    "Pipe ID": pipe_id,
+                    "From MH ID": from_mh or "(missing)",
+                    "To MH ID": to_mh or "(missing)",
+                })
+                continue
+
+            for manhole_id in (from_mh, to_mh):
+                if manhole_id not in manhole_node_ids:
+                    generated_id = f"mh_{len(manhole_node_ids)}"
+                    manhole_node_ids[manhole_id] = generated_id
+                    manhole_labels.append((generated_id, manhole_id))
+
+            valid_edge_rows.append((
+                manhole_node_ids[from_mh],
+                manhole_node_ids[to_mh],
+                pipe_id,
+                location,
+                diagram_text(df.iloc[row_index].get("Pipe_Type", "")),
+                row_index,
+            ))
+
+        if not valid_edge_rows:
+            st.warning(
+                "The network diagram cannot be drawn because no rows have both "
+                "a From manhole ID and a To manhole ID. Check those columns in "
+                "the uploaded CSV."
+            )
+        else:
+            dot_lines = [
+                "digraph SewerNetwork {",
+                '  graph [rankdir=LR, overlap=false, splines=true, '
+                'nodesep="0.45", ranksep="0.85", pad="0.25", bgcolor="transparent"];',
+                '  node [shape=ellipse, style="filled", fillcolor="#E8F2EB", '
+                'color="#397456", penwidth="1.2", fontname="Arial", fontsize="10", margin="0.12,0.08"];',
+                '  edge [color="#627D8B", fontname="Arial", fontsize="9", '
+                'fontcolor="#263746", arrowsize="0.75", penwidth="1.2"];',
+            ]
+
+            for generated_id, manhole_id in manhole_labels:
+                dot_lines.append(
+                    f'  {generated_id} [label="{dot_quote("MH\n" + manhole_id)}"];'
+                )
+
+            for from_node, to_node, pipe_id, location, pipe_type, row_index in valid_edge_rows:
+                pipe_label = (
+                    f"Pipe ID: {pipe_id}"
+                    if pipe_id and pipe_id != "(Pipe ID missing)"
+                    else f"Pipe row {row_index + 1}"
+                )
+                # Location is intentionally on the line directly below the Pipe ID.
+                edge_label = f"{pipe_label}\nLocation: {location}"
+                is_new_pipe = pipe_type.strip().lower() in {"new", "new pipe", "proposed"}
+                edge_color = "#14532D" if is_new_pipe else "#627D8B"
+                edge_font = "#14532D" if is_new_pipe else "#263746"
+                dot_lines.append(
+                    f'  {from_node} -> {to_node} [label="{dot_quote(edge_label)}", '
+                    f'color="{edge_color}", fontcolor="{edge_font}", penwidth="1.8"];'
+                )
+
+            dot_lines.append("}")
+            dot_source = "\n".join(dot_lines)
+
+            st.caption(
+                f"Diagram contains {len(manhole_node_ids)} unique manholes and "
+                f"{len(valid_edge_rows)} pipes with complete From/To connections."
+            )
+            st.graphviz_chart(dot_source, use_container_width=True)
+
+            if missing_connection_rows:
+                st.warning(
+                    f"{len(missing_connection_rows)} pipe row(s) are not shown in the "
+                    "diagram because a From or To manhole ID is missing."
+                )
+                with st.expander("Review pipes with missing manhole connections"):
+                    st.dataframe(
+                        pd.DataFrame(missing_connection_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        # =====================================================
+        # POPULATION TABLE
+        # =====================================================
+
+        st.subheader("Population")
+        st.caption(
+            "Edit the local Industrial Area (ha) input. The Industrial / Commercial "
+            "Cumulative Area (ha) is calculated automatically by adding the local "
+            "industrial area from this pipe and all connected upstream branches."
+        )
+        population_columns = id_columns + [
+            "Population_per_ha",
+            "Residential_Area_ha",
+            "Residential Population",
+            "Industrial_Area_ha",
+            "Industrial / Commercial Cumulative Area (ha)",
+            "Population Cumulative",
+            "Total Area (ha)"
+        ]
+        population_results = df[population_columns].copy()
+        population_formats = {
+            col: "{:.2f}"
+            for col in population_results.select_dtypes(include=[np.number]).columns
+        }
+        for col in ["Residential Population", "Population Cumulative"]:
+            population_formats[col] = "{:.0f}"
+        styled_population_results = population_results.style.format(population_formats)
+        population_disabled_columns = [
+            col for col in population_columns
+            if col not in population_editable_columns
+        ]
+        editor_generation = st.session_state.get("editor_generation", 0)
+        population_editor_key = f"population_data_editor_{editor_generation}"
+        edited_population_data = st.data_editor(
+            styled_population_results,
+            column_config={
+                "Location": st.column_config.TextColumn("Location"),
+                "Pipe_ID": st.column_config.TextColumn("Pipe ID"),
+                "From_MH_ID": st.column_config.TextColumn("From MH ID"),
+                "To_MH_ID": st.column_config.TextColumn("To MH ID"),
+                "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
+                "Population_per_ha": st.column_config.NumberColumn(
+                    "Population per ha", min_value=0.0, step=1.0, format="%.2f"
+                ),
+                "Residential_Area_ha": st.column_config.NumberColumn(
+                    "Residential Area (ha)", min_value=0.0, step=0.1, format="%.2f"
+                ),
+                "Residential Population": st.column_config.NumberColumn(
+                    "Residential Population", format="%.0f"
+                ),
+                "Industrial_Area_ha": st.column_config.NumberColumn(
+                    "Industrial Area (ha)", min_value=0.0, step=0.1, format="%.2f"
+                ),
+                "Industrial / Commercial Cumulative Area (ha)": st.column_config.NumberColumn(
+                    "Industrial / Commercial Cumulative Area (ha)", format="%.2f"
+                ),
+                "Population Cumulative": st.column_config.NumberColumn(
+                    "Population Cumulative", format="%.0f"
+                ),
+                "Total Area (ha)": st.column_config.NumberColumn(
+                    "Total Area (ha)", format="%.2f"
+                )
+            },
+            disabled=population_disabled_columns,
+            use_container_width=True,
+            hide_index=True,
+            key=population_editor_key,
+            on_change=save_editor_changes,
+            args=(population_editor_key, population_editable_columns)
+        )
+
+        # =====================================================
+        # FLOWS TABLE
+        # =====================================================
+
+        st.subheader("Flows")
+        flow_columns = id_columns + [
+            "Industrial / Commercial Cumulative Area (ha)",
+            "Peaking Factor M",
+            "Peak Population Flow Q(p)",
+            "Peak ICI Flow Q(p)",
+            "Peak Extraneous Flow Q(i)",
+            "Peak Design Flow Q(t)"
+        ]
+        flow_results = df[flow_columns].copy()
+        flow_formats = {
+            col: "{:.2f}"
+            for col in flow_results.select_dtypes(include=[np.number]).columns
+        }
+        st.dataframe(
+            flow_results.style.format(flow_formats),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # =====================================================
+        # FORMATTING / STYLING HELPERS
+        # =====================================================
+
+        def velocity_style(value):
+            if pd.isna(value):
+                return ""
+            if value <= 0.60 or value >= 3.00:
+                return "color: red; font-weight: bold"
+            if 0.60 < value <= 0.75:
+                return "color: orange; font-weight: bold"
+            return ""
+
+        def capacity_ratio_style(value):
+            if pd.notna(value) and value >= 80:
+                return "color: red; font-weight: bold"
+            return ""
+
+        def style_results(frame):
+            formats = {
+                col: "{:.2f}"
+                for col in frame.select_dtypes(include=[np.number]).columns
+            }
+            formats.update({
+                "Upstream_Invert_m": "{:.3f}",
+                "Downstream_Invert_m": "{:.3f}",
+                "Q Peak / Q Capacity (%)": "{:.2f}%"
+            })
+            for col in ["Residential Population", "Population Cumulative"]:
+                if col in frame.columns:
+                    formats[col] = "{:.0f}"
+            return (
+                frame.style
+                .map(velocity_style, subset=["Full Flow Velocity (m/s)"])
+                .map(capacity_ratio_style, subset=["Q Peak / Q Capacity (%)"])
+                .format(formats)
+            )
+
+        # =====================================================
+        # SEWER DATA TABLE (EDITABLE INPUTS)
+        # =====================================================
+
+        st.subheader("Sewer Data")
+        st.caption(
+            "Edit Length, Pipe Size, and invert elevations. The entered Pipe Size "
+            "is retained; hydraulic calculations use D_calc = D_input / 25 * 25.4. "
+            "Hydraulic results and the Results table recalculate automatically."
+        )
+
+        id_columns = [
+            "Location", "Pipe_ID", "From_MH_ID", "To_MH_ID", "Subcatchment_ID"
+        ]
+        sewer_columns = id_columns + [
+            "Peak Design Flow Q(t)",
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m",
+            "Pipe_Type",
+            "Slope (%)",
+            "Calculated Diameter (mm)",
+            "Capacity (L/s)",
+            "Full Flow Velocity (m/s)",
+            "Q Peak / Q Capacity (%)"
+        ]
+        sewer_editor_df = df[sewer_columns].copy()
+        disabled_columns = [col for col in sewer_columns if col not in editable_columns]
+
+        sewer_editor_formats = {
+            col: "{:.2f}"
+            for col in sewer_editor_df.select_dtypes(include=[np.number]).columns
+        }
+        sewer_editor_formats.update({
+            "Upstream_Invert_m": "{:.3f}",
+            "Downstream_Invert_m": "{:.3f}",
+            "Q Peak / Q Capacity (%)": "{:.2f}%"
+        })
+        styled_sewer_editor_df = (
+            sewer_editor_df.style
+            .map(velocity_style, subset=["Full Flow Velocity (m/s)"])
+            .map(capacity_ratio_style, subset=["Q Peak / Q Capacity (%)"])
+            .format(sewer_editor_formats)
+        )
+
+        editor_generation = st.session_state.get("editor_generation", 0)
+        sewer_editor_key = f"sewer_data_editor_{editor_generation}"
+        edited_sewer_data = st.data_editor(
+            styled_sewer_editor_df,
+            column_config={
+                "Location": st.column_config.TextColumn("Location"),
+                "Pipe_ID": st.column_config.TextColumn("Pipe ID"),
+                "From_MH_ID": st.column_config.TextColumn("From MH ID"),
+                "To_MH_ID": st.column_config.TextColumn("To MH ID"),
+                "Subcatchment_ID": st.column_config.TextColumn("Subcatchment Area ID"),
+                "Peak Design Flow Q(t)": st.column_config.NumberColumn("Peak Design Flow Q(t) (L/s)", format="%.2f"),
+                "Length_m": st.column_config.NumberColumn("Length (m)", min_value=0.0, step=1.0, format="%.2f"),
+                "Pipe_Diameter_mm": st.column_config.NumberColumn("Pipe Size (mm)", min_value=0.0, step=25.0, format="%.2f"),
+                "Upstream_Invert_m": st.column_config.NumberColumn("Upstream Invert (m)", step=0.001, format="%.3f"),
+                "Downstream_Invert_m": st.column_config.NumberColumn("Downstream Invert (m)", step=0.001, format="%.3f"),
+                "Pipe_Type": st.column_config.TextColumn("Type of Pipe"),
+                "Slope (%)": st.column_config.NumberColumn("Slope (%)", format="%.2f"),
+                "Calculated Diameter (mm)": st.column_config.NumberColumn(
+                    "Calculated Diameter (mm)", format="%.2f"
+                ),
+                "Capacity (L/s)": st.column_config.NumberColumn("Capacity (L/s), n=0.013", format="%.2f"),
+                "Full Flow Velocity (m/s)": st.column_config.NumberColumn("Full Flow Velocity (m/s)", format="%.2f"),
+                "Q Peak / Q Capacity (%)": st.column_config.NumberColumn("Q Peak / Q Capacity", format="%.2f%%")
+            },
+            disabled=disabled_columns,
+            use_container_width=True,
+            hide_index=True,
+            key=sewer_editor_key,
+            on_change=save_editor_changes,
+            args=(sewer_editor_key, editable_columns)
+        )
+
+        # All current editable values have already been merged into the persistent
+        # dataframe by the editor callback before this rerun. Calculations above
+        # therefore feed the same current values into Results and the CSV export.
+
+        # Preserve full precision for calculations; apply display formatting in tables.
+        # =====================================================
+        # RESULTS TABLE (ALL INFORMATION JOINED)
+        # =====================================================
+
+        result_columns = id_columns + [
+            "Population_per_ha",
+            "Residential_Area_ha",
+            "Residential Population",
+            "Industrial_Area_ha",
+            "Industrial / Commercial Cumulative Area (ha)",
+            "Population Cumulative",
+            "Total Area (ha)",
+            "Peaking Factor M",
+            "Peak Population Flow Q(p)",
+            "Peak ICI Flow Q(p)",
+            "Peak Extraneous Flow Q(i)",
+            "Peak Design Flow Q(t)",
+            "Length_m",
+            "Pipe_Diameter_mm",
+            "Upstream_Invert_m",
+            "Downstream_Invert_m",
+            "Pipe_Type",
+            "Slope (%)",
+            "Calculated Diameter (mm)",
+            "Capacity (L/s)",
+            "Full Flow Velocity (m/s)",
+            "Q Peak / Q Capacity (%)"
+        ]
+        results = df[result_columns].copy()
+        results = results[results["Pipe_ID"].notna()].reset_index(drop=True)
+
+        st.success(
+            "Sanitary sewer design completed successfully. "
+            f"{len(results)} records processed."
+        )
+        st.subheader("Results")
+        st.dataframe(
+            style_results(results),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # =====================================================
+        # PROJECT TOTALS
+        # =====================================================
+
+        st.subheader("Project Totals")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        # Round the summed full-precision population only for presentation;
+        # do not truncate it or round individual pipe contributions first.
+        total_population = int(np.floor(df["Residential Population"].sum() + 0.5))
+        col1.metric("Total Population", f"{total_population:,}")
+
+        col2.metric(
+            "Residential Area (ha)",
+            f"{df['Residential_Area_ha'].sum():,.2f}"
+        )
+
+        col3.metric(
+            "Industrial Area (ha)",
+            f"{df['Industrial_Area_ha'].sum():,.2f}"
+        )
+
+        pipe_type_normalized = df["Pipe_Type"].fillna("").astype(str).str.strip().str.lower()
+        new_pipe_mask = pipe_type_normalized.isin({"new", "new pipe", "proposed"})
+        total_new_pipe_length = pd.to_numeric(
+            df.loc[new_pipe_mask, "Length_m"], errors="coerce"
+        ).fillna(0).sum()
+        col4.metric("Total Length of New Pipes (m)", f"{total_new_pipe_length:,.2f}")
+
+        # =====================================================
+        # DOWNLOAD RESULTS
+        # =====================================================
+
+        export_results = results.copy()
+        population_count_columns = [
+            "Residential Population", "Population Cumulative"
+        ]
+        for col in export_results.select_dtypes(include=[np.number]).columns:
+            if col in population_count_columns:
+                export_results[col] = export_results[col].map(
+                    lambda value: f"{value:.0f}" if pd.notna(value) else ""
+                )
+            elif col in ["Upstream_Invert_m", "Downstream_Invert_m"]:
+                export_results[col] = export_results[col].map(
+                    lambda value: f"{value:.3f}" if pd.notna(value) else ""
+                )
+            else:
+                export_results[col] = export_results[col].map(
+                    lambda value: f"{value:.2f}" if pd.notna(value) else ""
+                )
+        export_results["Q Peak / Q Capacity (%)"] = results["Q Peak / Q Capacity (%)"].map(
+            lambda value: f"{value:.2f}%" if pd.notna(value) else ""
+        )
+        csv_data = export_results.to_csv(index=False)
+
+        st.download_button(
+            label="Download Sewer Design CSV",
+            data=csv_data,
+            file_name="sanitary_sewer_design.csv",
+            mime="text/csv"
+        )
+
+        # =====================================================
+        # DOWNLOAD CURRENT INPUTS (INCLUDING IN-APP EDITS)
+        # =====================================================
+
+        input_export_columns = [
+            "Location", "Pipe_ID", "From_MH_ID", "To_MH_ID", "Subcatchment_ID",
+            "Population_per_ha", "Residential_Area_ha", "Industrial_Area_ha",
+            "Length_m", "Pipe_Diameter_mm", "Upstream_Invert_m",
+            "Downstream_Invert_m", "Pipe_Type"
+        ]
+        input_export = df[input_export_columns].copy()
+        input_export = input_export.rename(columns={
+            "Pipe_ID": "Pipe ID",
+            "From_MH_ID": "From",
+            "To_MH_ID": "To",
+            "Subcatchment_ID": "Subcatchment Area ID",
+            "Population_per_ha": "Population per ha",
+            "Residential_Area_ha": "Residential Area (ha)",
+            "Industrial_Area_ha": "Industrial Area (ha)",
+            "Length_m": "Length (m)",
+            "Pipe_Diameter_mm": "Pipe Diameter (mm)",
+            "Upstream_Invert_m": "Upstream Invert (m)",
+            "Downstream_Invert_m": "Downstream Invert (m)",
+            "Pipe_Type": "Type of Pipe"
+        })
+        input_csv = input_export.to_csv(index=False)
+
+        st.download_button(
+            label="Download Current Input Table CSV",
+            data=input_csv,
+            file_name="sanitary_sewer_current_inputs.csv",
+            mime="text/csv",
+            help="Exports the current input values, including edits made in the app, in the same network order as Results."
+        )
+
+        # =====================================================
+        # HTML DESIGN REPORT (NO EXTRA PACKAGE REQUIRED)
+        # =====================================================
+
+        import html
+
+        def html_escape(value):
+            try:
+                if pd.isna(value):
+                    return "-"
+            except (TypeError, ValueError):
+                pass
+            return html.escape(str(value))
+
+        def fmt_html(value, digits=2):
+            try:
+                return f"{float(value):,.{digits}f}"
+            except (TypeError, ValueError):
+                return "-"
+
+        parameter_rows = [
+            ("Average Daily Per Capita Flow (L/cap/day)", fmt_html(q)),
+            ("Extraneous Flow Rate (L/ha/s)", fmt_html(i)),
+            ("Commercial Domestic Sewage (L/d-m2)", fmt_html(commercial_domestic_sewage)),
+            ("Commercial / ICI Peaking Factor", fmt_html(ici_peak)),
+            ("Manning n", fmt_html(n)),
+            ("Velocity review criteria", "Flag <= 0.60 m/s; caution > 0.60 to 0.75 m/s; flag >= 3.00 m/s"),
+            ("Q Peak / Q Capacity review criterion", "Flag >= 80%"),
+        ]
+        total_rows = [
+            ("Total population used (persons)", f"{total_population:,}"),
+            ("Total residential area (ha)", fmt_html(df["Residential_Area_ha"].sum())),
+            ("Total industrial/commercial area (ha)", fmt_html(df["Industrial_Area_ha"].sum())),
+            ("Total length of new pipes (m)", fmt_html(total_new_pipe_length)),
+        ]
+
+        new_pipes = results[
+            results["Pipe_Type"].fillna("").astype(str).str.strip().str.lower()
+            .isin({"new", "new pipe", "proposed"})
+        ].copy()
+        schedule_headers = ["Pipe ID", "Location", "Diameter (mm)", "Capacity (L/s)",
+                           "Velocity (m/s)", "Q Peak / Q Capacity (%)", "Design check"]
+        schedule_rows = []
+        for _, row in new_pipes.iterrows():
+            velocity = row["Full Flow Velocity (m/s)"]
+            ratio = row["Q Peak / Q Capacity (%)"]
+            issues = []
+            if pd.isna(velocity):
+                issues.append("Velocity unavailable")
+            elif velocity <= 0.60:
+                issues.append("Velocity low (<=0.60)")
+            elif velocity <= 0.75:
+                issues.append("Velocity caution (>0.60 to 0.75)")
+            elif velocity >= 3.00:
+                issues.append("Velocity high (>=3.00)")
+            if pd.isna(ratio):
+                issues.append("Q ratio unavailable")
+            elif ratio >= 80:
+                issues.append("Q ratio >=80%")
+            check = "; ".join(issues) if issues else "Within designated ranges"
+            schedule_rows.append([
+                html_escape(row["Pipe_ID"]), html_escape(row["Location"]),
+                fmt_html(row["Pipe_Diameter_mm"]), fmt_html(row["Capacity (L/s)"], 2),
+                fmt_html(velocity, 2),
+                (fmt_html(ratio, 2) + "%") if pd.notna(ratio) else "-",
+                html_escape(check)
+            ])
+
+        def html_table(headers, rows):
+            head = "".join(f"<th>{html_escape(h)}</th>" for h in headers)
+            body = "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
+            return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+        if not schedule_rows:
+            schedule_html = "<p>No pipes are identified as New, New Pipe, or Proposed.</p>"
+        else:
+            schedule_html = html_table(schedule_headers, schedule_rows)
+
+        html_report = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sanitary Sewer Design Report</title>
+<style>
+:root {{ color-scheme: light; }}
+body {{ font-family: Arial, Helvetica, sans-serif; color: #1f2937; margin: 0; background: #f3f4f6; }}
+main {{ max-width: 1100px; margin: 28px auto; padding: 36px; background: white; box-shadow: 0 2px 12px #0001; }}
+h1 {{ color: #14532d; margin-bottom: 6px; }} h2 {{ color: #166534; border-bottom: 2px solid #dcfce7; padding-bottom: 6px; margin-top: 30px; }}
+.subtitle {{ color: #6b7280; margin-top: 0; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0 24px; font-size: 13px; }}
+th, td {{ border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; }}
+th {{ background: #14532d; color: white; }}
+tr:nth-child(even) {{ background: #f9fafb; }}
+.note {{ background: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px 16px; }}
+@media print {{ body {{ background: white; }} main {{ margin: 0; padding: 12px; box-shadow: none; max-width: none; }} table {{ page-break-inside: auto; }} tr {{ page-break-inside: avoid; }} }}
+</style>
+</head>
+<body><main>
+<h1>Sanitary Sewer Design Report</h1>
+<p class="subtitle">Preliminary sanitary sewer network calculations</p>
+<h2>About this application</h2>
+<p>This tool supports preliminary sanitary sewer network calculations. It reads pipe, manhole, population, area, and pipe geometry data from a CSV file, then calculates cumulative upstream contributions, estimated sewage flows, and hydraulic performance for each pipe.</p>
+<p>The app orders connected pipes upstream-to-downstream; accumulates residential population, residential area, and industrial/commercial area through connected branches; calculates peak population, ICI and extraneous flows; and evaluates Manning-based full-flow capacity, velocity, and peak-flow-to-capacity ratio. Editable input tables allow selected values to be changed in the app, with calculations refreshed from the current values.</p>
+<h2>Diameter relationship</h2>
+<p>Hydraulic calculations use <code>D_calc = D_input / 25 * 25.4</code>. The entered diameter is retained as the input value.</p>
+<h2>Design reference and limitations</h2>
+<p>This workflow and selected calculation methods are informed by the Ontario Ministry of the Environment’s Design Guidelines for Sewage Works. This tool is a calculation aid; it does not implement every guideline requirement or certify design compliance. Confirm current provincial and municipal criteria, project conditions, assumptions, and results through appropriate engineering review. Reference: <a href="https://www.ontario.ca/document/design-guidelines-sewage-works-0">Ontario Design Guidelines for Sewage Works</a>.</p>
+<h2>Design Parameters</h2>
+{html_table(["Parameter", "Value"], parameter_rows)}
+<h2>Project Totals</h2>
+{html_table(["Project total", "Value"], total_rows)}
+<h2>New Pipe Schedule and Design Checks</h2>
+{schedule_html}
+<p class="note">Review criteria: velocity <= 0.60 m/s or >= 3.00 m/s is flagged; velocity > 0.60 and <= 0.75 m/s is a caution range. The designated velocity range without these flags is > 0.75 and < 3.00 m/s. Q Peak / Q Capacity >= 80% is flagged. A pipe is reported as within designated ranges only when both checks are available and neither criterion is triggered.</p>
+</main></body></html>'''
+
+        st.download_button(
+            label="Download HTML Design Report",
+            data=html_report.encode("utf-8"),
+            file_name="sanitary_sewer_design_report.html",
+            mime="text/html",
+            help="Downloads a self-contained web report that opens in a browser; no PDF or Word package is needed."
+        )
+
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        st.exception(e)
+
+else:
+    st.info("Upload a CSV file to begin.")
